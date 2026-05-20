@@ -33,7 +33,14 @@ window.STATUS_CONFIG = {
 
   // Client statuses
   // active and inactive reused from above
-  new: { label: 'New', class: 'status-new', icon: '★' }
+
+  // Care request statuses
+  new: { label: 'New', class: 'status-new', icon: '★' },
+  reviewing: { label: 'Reviewing', class: 'status-reviewing', icon: '👁️' },
+  onboarding: { label: 'Onboarding', class: 'status-onboarding', icon: '📋' },
+  approved: { label: 'Approved', class: 'status-approved', icon: '✓' },
+  denied: { label: 'Denied', class: 'status-denied', icon: '✕' },
+  converted_to_client: { label: 'Converted', class: 'status-converted', icon: '✅' }
 };
 
 // Navigation Items

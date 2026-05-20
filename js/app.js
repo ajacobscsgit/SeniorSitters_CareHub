@@ -278,9 +278,12 @@ async function renderCareRequests() {
         
         <div class="filter-tabs">
             <button class="filter-tab active" data-filter="all">All</button>
-            <button class="filter-tab" data-filter="pending">Pending</button>
+            <button class="filter-tab" data-filter="new">New</button>
+            <button class="filter-tab" data-filter="reviewing">Reviewing</button>
+            <button class="filter-tab" data-filter="onboarding">Onboarding</button>
             <button class="filter-tab" data-filter="approved">Approved</button>
             <button class="filter-tab" data-filter="denied">Denied</button>
+            <button class="filter-tab" data-filter="converted_to_client">Converted</button>
         </div>
         
         <div class="card">
@@ -413,18 +416,18 @@ async function loadCaregivers(filter = 'all') {
                         <th>Name</th>
                         <th>Email</th>
                         <th>Phone</th>
-                        <th>Experience</th>
-                        <th>Status</th>
+                        <th>City</th>
+                        <th>Onboarding Status</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     ${caregivers.map(cg => `
                         <tr data-id="${cg.id}">
-                            <td><strong>${escapeHtml(cg.first_name)} ${escapeHtml(cg.last_name)}</strong></td>
-                            <td>${escapeHtml(cg.email)}</td>
+                            <td><strong>${escapeHtml(cg.name || 'N/A')}</strong></td>
+                            <td>${escapeHtml(cg.email || 'N/A')}</td>
                             <td>${escapeHtml(cg.phone || 'N/A')}</td>
-                            <td>${cg.experience_years || 0} years</td>
+                            <td>${escapeHtml(cg.city || 'N/A')}</td>
                             <td>${renderStatusBadge(cg.status)}</td>
                             <td class="actions">
                                 <button class="btn btn-sm btn-secondary" onclick="viewCaregiver('${cg.id}')">
@@ -596,24 +599,42 @@ async function viewCareRequest(id) {
         alert('Care request not found');
         return;
     }
-    
+
     currentData = request;
-    
+
     modalTitle.textContent = 'Care Request Details';
     modalBody.innerHTML = renderCareRequestDetails(request);
-    
-    if (request.status === 'pending') {
-        modalFooter.innerHTML = `
-            <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+
+    // Build action buttons based on workflow status
+    // Workflow: new → reviewing → onboarding → approved → converted_to_client
+    let actionButtons = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+
+    if (request.status === 'new') {
+        // Can move to reviewing or deny
+        actionButtons += `
             <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Deny</button>
-            <button class="btn btn-success" onclick="approveCareRequest('${id}')">Approve</button>
+            <button class="btn btn-warning" onclick="updateCareRequestStatusUI('${id}', 'reviewing')">Start Review</button>
         `;
-    } else {
-        modalFooter.innerHTML = `
-            <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+    } else if (request.status === 'reviewing') {
+        // Can move to onboarding or deny
+        actionButtons += `
+            <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Deny</button>
+            <button class="btn btn-success" onclick="updateCareRequestStatusUI('${id}', 'onboarding')">Approve for Onboarding</button>
+        `;
+    } else if (request.status === 'onboarding') {
+        // Can mark approved (ready for conversion)
+        actionButtons += `
+            <button class="btn btn-success" onclick="updateCareRequestStatusUI('${id}', 'approved')">Complete Onboarding</button>
+        `;
+    } else if (request.status === 'approved') {
+        // Can convert to client
+        actionButtons += `
+            <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">Convert to Client</button>
         `;
     }
-    
+    // For 'denied' and 'converted_to_client' - no actions, just close
+
+    modalFooter.innerHTML = actionButtons;
     openModal();
 }
 
@@ -665,9 +686,9 @@ async function approveApplication(id) {
     // Create caregiver from application
     const caregiver = await createCaregiverFromApplication(currentData);
     if (caregiver) {
-        alert(`Application approved! Caregiver ${caregiver.first_name} ${caregiver.last_name} has been created with status 'onboarding'.`);
+        alert(`Application approved! Caregiver "${caregiver.name}" has been created with status 'onboarding'.`);
     } else {
-        alert('Application approved, but failed to create caregiver profile. Please check the database.');
+        alert('Application approved, but failed to create caregiver profile. Check console for errors.');
     }
     
     closeModal();
@@ -688,33 +709,10 @@ async function denyApplication(id) {
     }
 }
 
-async function approveCareRequest(id) {
-    if (!confirm('Are you sure you want to approve this care request? This will create a new client profile.')) {
-        return;
-    }
-    
-    const success = await updateCareRequestStatus(id, 'approved');
-    if (!success) {
-        alert('Failed to approve care request');
-        return;
-    }
-    
-    // Create client from care request
-    const client = await createClientFromCareRequest(currentData);
-    if (client) {
-        alert(`Care request approved! Client ${client.first_name} ${client.last_name} has been created.`);
-    } else {
-        alert('Care request approved, but failed to create client profile. Please check the database.');
-    }
-    
-    closeModal();
-    loadPage('care-requests');
-}
-
 async function denyCareRequest(id) {
     const notes = prompt('Optional: Add a note for why this care request was denied:');
     if (notes === null) return;
-    
+
     const success = await updateCareRequestStatus(id, 'denied', notes);
     if (success) {
         alert('Care request has been denied.');
@@ -723,6 +721,34 @@ async function denyCareRequest(id) {
     } else {
         alert('Failed to deny care request');
     }
+}
+
+async function updateCareRequestStatusUI(id, status) {
+    const success = await updateCareRequestStatus(id, status);
+    if (success) {
+        alert(`Care request marked as ${status}.`);
+        closeModal();
+        loadPage('care-requests');
+    } else {
+        alert('Failed to update care request status');
+    }
+}
+
+async function convertCareRequestToClient(id) {
+    if (!confirm('Are you sure you want to convert this care request to a client?')) {
+        return;
+    }
+
+    // Create client from care request
+    const client = await createClientFromCareRequest(currentData);
+    if (client) {
+        alert(`Care request converted! Client "${client.first_name} ${client.last_name}" has been created.`);
+    } else {
+        alert('Failed to create client profile. Check console for errors.');
+    }
+
+    closeModal();
+    loadPage('care-requests');
 }
 
 // ==================== MODAL FUNCTIONS ====================
@@ -909,13 +935,13 @@ function renderCareRequestDetails(req) {
                 </div>
             </div>
         </div>
-        
+
         <div class="detail-section">
             <h4>Care Details</h4>
             <div class="detail-grid">
                 <div class="detail-item" style="grid-column: 1 / -1;">
                     <div class="detail-label">Care Needs</div>
-                    <div class="detail-value">${escapeHtml(req.care_needs || 'Not specified')}</div>
+                    <div class="detail-value" style="white-space: pre-wrap;">${escapeHtml(req.care_needs || 'Not specified')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Schedule Preference</div>
@@ -931,23 +957,53 @@ function renderCareRequestDetails(req) {
                 </div>
             </div>
         </div>
-        
+
         ${req.additional_notes ? `
         <div class="detail-section">
-            <h4>Additional Notes</h4>
+            <h4>Client Notes</h4>
             <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(req.additional_notes)}</p>
         </div>
         ` : ''}
-        
+
         <div class="detail-section">
-            <h4>Request Status</h4>
-            <div style="display: flex; align-items: center; gap: var(--spacing-md);">
-                ${renderStatusBadge(req.status)}
-                <span style="color: var(--warm-muted); font-size: 0.9rem;">
-                    Submitted ${formatDate(req.created_at)}
-                </span>
+            <h4>Request Status History</h4>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <div class="detail-label">Current Status</div>
+                    <div class="detail-value">${renderStatusBadge(req.status)}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Submitted</div>
+                    <div class="detail-value">${formatDateTime(req.created_at)}</div>
+                </div>
+                ${req.approved_at ? `
+                <div class="detail-item">
+                    <div class="detail-label">Approved</div>
+                    <div class="detail-value">${formatDateTime(req.approved_at)}</div>
+                </div>
+                ` : ''}
+                ${req.converted_at ? `
+                <div class="detail-item">
+                    <div class="detail-label">Converted to Client</div>
+                    <div class="detail-value">${formatDateTime(req.converted_at)}</div>
+                </div>
+                ` : ''}
             </div>
         </div>
+
+        ${req.admin_notes ? `
+        <div class="detail-section">
+            <h4>Admin Notes</h4>
+            <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(req.admin_notes)}</p>
+        </div>
+        ` : ''}
+
+        ${req.denial_reason ? `
+        <div class="detail-section">
+            <h4>Denial Reason</h4>
+            <p style="white-space: pre-wrap; background: #FEE2E2; padding: var(--spacing-md); border-radius: var(--radius-md); color: #991B1B;">${escapeHtml(req.denial_reason)}</p>
+        </div>
+        ` : ''}
     `;
 }
 
@@ -958,40 +1014,88 @@ function renderCaregiverDetails(cg) {
             <div class="detail-grid">
                 <div class="detail-item">
                     <div class="detail-label">Full Name</div>
-                    <div class="detail-value">${escapeHtml(cg.first_name)} ${escapeHtml(cg.last_name)}</div>
+                    <div class="detail-value">${escapeHtml(cg.name || 'N/A')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Email</div>
-                    <div class="detail-value">${escapeHtml(cg.email)}</div>
+                    <div class="detail-value">${escapeHtml(cg.email || 'N/A')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Phone</div>
                     <div class="detail-value">${escapeHtml(cg.phone || 'N/A')}</div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">Status</div>
-                    <div class="detail-value">${renderStatusBadge(cg.status)}</div>
+                    <div class="detail-label">City</div>
+                    <div class="detail-value">${escapeHtml(cg.city || 'N/A')}</div>
                 </div>
             </div>
         </div>
-        
+
         <div class="detail-section">
-            <h4>Professional Details</h4>
+            <h4>Availability & Capabilities</h4>
+            <div class="detail-grid">
+                <div class="detail-item" style="grid-column: 1 / -1;">
+                    <div class="detail-label">Availability</div>
+                    <div class="detail-value">${escapeHtml(cg.availability || 'Not specified')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Has Transportation</div>
+                    <div class="detail-value">${formatBoolean(cg.transportation)}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Willing to do Outings</div>
+                    <div class="detail-value">${formatBoolean(cg.willing_outings)}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Pay Rate</div>
+                    <div class="detail-value">$${cg.pay_rate || 17}/hour</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="detail-section">
+            <h4>Experience & Motivation</h4>
+            <div class="detail-grid">
+                <div class="detail-item" style="grid-column: 1 / -1;">
+                    <div class="detail-label">Relevant Experience</div>
+                    <div class="detail-value" style="white-space: pre-wrap;">${escapeHtml(cg.experience || 'Not provided')}</div>
+                </div>
+                <div class="detail-item" style="grid-column: 1 / -1;">
+                    <div class="detail-label">Why Work with Seniors</div>
+                    <div class="detail-value" style="white-space: pre-wrap;">${escapeHtml(cg.why_work_with_seniors || 'Not provided')}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="detail-section">
+            <h4>Onboarding Checklist</h4>
             <div class="detail-grid">
                 <div class="detail-item">
-                    <div class="detail-label">Experience</div>
-                    <div class="detail-value">${cg.experience_years || 0} years</div>
+                    <div class="detail-label">Caregiver Status</div>
+                    <div class="detail-value">${renderStatusBadge(cg.status)}</div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">Certifications</div>
-                    <div class="detail-value">${Array.isArray(cg.certifications) ? cg.certifications.join(', ') : 'None listed'}</div>
+                    <div class="detail-label">Background Check</div>
+                    <div class="detail-value">${renderStatusBadge(cg.background_check_status || 'pending')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Training</div>
+                    <div class="detail-value">${renderStatusBadge(cg.training_status || 'pending')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Documents</div>
+                    <div class="detail-value">${renderStatusBadge(cg.documents_status || 'pending')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Welcome Package</div>
+                    <div class="detail-value">${renderStatusBadge(cg.welcome_package_status || 'not_sent')}</div>
                 </div>
             </div>
         </div>
-        
+
         ${cg.notes ? `
         <div class="detail-section">
-            <h4>Notes</h4>
+            <h4>Admin Notes</h4>
             <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(cg.notes)}</p>
         </div>
         ` : ''}
@@ -1093,7 +1197,8 @@ window.viewCaregiver = viewCaregiver;
 window.viewClient = viewClient;
 window.approveApplication = approveApplication;
 window.denyApplication = denyApplication;
-window.approveCareRequest = approveCareRequest;
 window.denyCareRequest = denyCareRequest;
+window.updateCareRequestStatusUI = updateCareRequestStatusUI;
+window.convertCareRequestToClient = convertCareRequestToClient;
 window.closeModal = closeModal;
 window.testDirectQuery = testDirectQuery;

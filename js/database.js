@@ -142,27 +142,47 @@ async function getApplicationById(id) {
  */
 async function updateApplicationStatus(id, status, notes = '') {
     if (!supabaseClient) return false;
-    
+
+    console.log(`[CareHub] Updating application ${id} to status: ${status}`);
+
     const updates = {
         status: status,
-        admin_notes: notes,
         updated_at: new Date().toISOString()
     };
-    
+
     if (status === 'approved') {
         updates.approved_at = new Date().toISOString();
     }
-    
+
+    if (status === 'denied' && notes) {
+        // Save denial reason separately from admin notes
+        updates.denial_reason = notes;
+    } else if (notes) {
+        updates.admin_notes = notes;
+    }
+
     const { error } = await supabaseClient
         .from(TABLES.APPLICATIONS)
         .update(updates)
         .eq('id', id);
-    
+
     if (error) {
-        console.error('Error updating application:', error);
+        console.error('[CareHub] ERROR updating application:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+
+        // Check for missing column errors
+        if (error.message && error.message.includes('column')) {
+            const columnMatch = error.message.match(/column "([^"]+)"/);
+            if (columnMatch) {
+                console.error(`[CareHub] MISSING COLUMN: applications table needs column "${columnMatch[1]}"`);
+            }
+        }
+
         return false;
     }
-    
+
+    console.log(`[CareHub] Application ${id} updated to ${status} successfully`);
     return true;
 }
 
@@ -174,24 +194,32 @@ async function updateApplicationStatus(id, status, notes = '') {
  * @returns {Promise<Array>}
  */
 async function getCareRequests(filters = {}) {
-    if (!supabaseClient) return [];
-    
+    console.log('[CareHub] === Fetching Care Requests ===');
+    console.log('[CareHub] Filters:', JSON.stringify(filters));
+
+    if (!supabaseClient) {
+        console.error('[CareHub] ERROR: Supabase client not initialized');
+        return [];
+    }
+
     let query = supabaseClient
         .from(TABLES.CARE_REQUESTS)
         .select('*')
         .order('created_at', { ascending: false });
-    
+
     if (filters.status) {
         query = query.eq('status', filters.status);
+        console.log('[CareHub] Filtering by status:', filters.status);
     }
-    
+
     const { data, error } = await query;
-    
+
     if (error) {
-        console.error('Error fetching care requests:', error);
+        console.error('[CareHub] ERROR fetching care requests:', error);
         return [];
     }
-    
+
+    console.log('[CareHub] SUCCESS - Care requests returned:', data ? data.length : 0);
     return data || [];
 }
 
@@ -226,27 +254,51 @@ async function getCareRequestById(id) {
  */
 async function updateCareRequestStatus(id, status, notes = '') {
     if (!supabaseClient) return false;
-    
+
+    console.log(`[CareHub] Updating care request ${id} to status: ${status}`);
+
     const updates = {
         status: status,
-        admin_notes: notes,
         updated_at: new Date().toISOString()
     };
-    
+
+    // Track timestamps for key status changes
     if (status === 'approved') {
         updates.approved_at = new Date().toISOString();
     }
-    
+    if (status === 'converted_to_client') {
+        updates.converted_at = new Date().toISOString();
+    }
+
+    // Handle notes based on status
+    if (status === 'denied' && notes) {
+        updates.denial_reason = notes;
+    } else if (notes) {
+        updates.admin_notes = notes;
+    }
+
     const { error } = await supabaseClient
         .from(TABLES.CARE_REQUESTS)
         .update(updates)
         .eq('id', id);
-    
+
     if (error) {
-        console.error('Error updating care request:', error);
+        console.error('[CareHub] ERROR updating care request:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+
+        // Check for missing column errors
+        if (error.message && error.message.includes('column')) {
+            const columnMatch = error.message.match(/column "([^"]+)"/);
+            if (columnMatch) {
+                console.error(`[CareHub] MISSING COLUMN: care_requests table needs column "${columnMatch[1]}"`);
+            }
+        }
+
         return false;
     }
-    
+
+    console.log(`[CareHub] Care request ${id} updated to ${status} successfully`);
     return true;
 }
 
@@ -258,24 +310,32 @@ async function updateCareRequestStatus(id, status, notes = '') {
  * @returns {Promise<Array>}
  */
 async function getCaregivers(filters = {}) {
-    if (!supabaseClient) return [];
-    
+    console.log('[CareHub] === Fetching Caregivers ===');
+    console.log('[CareHub] Filters:', JSON.stringify(filters));
+
+    if (!supabaseClient) {
+        console.error('[CareHub] ERROR: Supabase client not initialized');
+        return [];
+    }
+
     let query = supabaseClient
         .from(TABLES.CAREGIVERS)
         .select('*')
         .order('created_at', { ascending: false });
-    
+
     if (filters.status) {
         query = query.eq('status', filters.status);
+        console.log('[CareHub] Filtering by status:', filters.status);
     }
-    
+
     const { data, error } = await query;
-    
+
     if (error) {
-        console.error('Error fetching caregivers:', error);
+        console.error('[CareHub] ERROR fetching caregivers:', error);
         return [];
     }
-    
+
+    console.log('[CareHub] SUCCESS - Caregivers returned:', data ? data.length : 0);
     return data || [];
 }
 
@@ -308,7 +368,9 @@ async function getCaregiverById(id) {
  */
 async function createCaregiverFromApplication(application) {
     if (!supabaseClient) return null;
-    
+
+    console.log('[CareHub] Creating caregiver from application:', application.id, application.full_name);
+
     // Map actual application fields to caregiver fields
     const caregiver = {
         name: application.full_name,
@@ -318,6 +380,9 @@ async function createCaregiverFromApplication(application) {
         availability: application.availability,
         transportation: application.transportation,
         willing_outings: application.willing_outings,
+        // Experience and motivation from application
+        experience: application.experience || '',
+        why_work_with_seniors: application.why_work_with_seniors || '',
         application_id: application.id,
         status: 'onboarding',
         pay_rate: 17,
@@ -325,30 +390,51 @@ async function createCaregiverFromApplication(application) {
         training_status: 'pending',
         documents_status: 'pending',
         welcome_package_status: 'not_sent',
-        notes: `Created from application ${application.id}.\n\nExperience: ${application.experience || 'Not provided'}\n\nWhy work with seniors: ${application.why_work_with_seniors || 'Not provided'}`,
+        // Admin notes for onboarding tracking
+        notes: '',
         created_at: new Date().toISOString()
     };
-    
+
+    console.log('[CareHub] Inserting caregiver:', caregiver);
+
     const { data, error } = await supabaseClient
         .from(TABLES.CAREGIVERS)
         .insert([caregiver])
         .select()
         .single();
-    
+
     if (error) {
-        console.error('Error creating caregiver:', error);
+        console.error('[CareHub] ERROR creating caregiver:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+
+        // Check for missing column errors
+        if (error.message && error.message.includes('column')) {
+            const columnMatch = error.message.match(/column "([^"]+)"/);
+            if (columnMatch) {
+                console.error(`[CareHub] MISSING COLUMN: caregivers table needs column "${columnMatch[1]}"`);
+            }
+        }
+
         return null;
     }
-    
+
+    console.log('[CareHub] Caregiver created successfully:', data);
+
     // Create notification
-    await createNotification({
+    console.log('[CareHub] Creating notification for new caregiver...');
+    const notification = await createNotification({
         type: 'caregiver_created',
         title: 'New Caregiver Onboarding',
         message: `${caregiver.name} has been added as a new caregiver (onboarding).`,
         related_id: data.id,
         related_type: 'caregiver'
     });
-    
+
+    if (!notification) {
+        console.warn('[CareHub] Failed to create notification, but caregiver was created');
+    }
+
     return data;
 }
 
@@ -434,7 +520,9 @@ async function getClientById(id) {
  */
 async function createClientFromCareRequest(careRequest) {
     if (!supabaseClient) return null;
-    
+
+    console.log('[CareHub] Creating client from care request:', careRequest.id, careRequest.first_name, careRequest.last_name);
+
     const client = {
         first_name: careRequest.first_name,
         last_name: careRequest.last_name,
@@ -453,27 +541,54 @@ async function createClientFromCareRequest(careRequest) {
         notes: `Created from care request ${careRequest.id}. ${careRequest.additional_notes || ''}`,
         created_at: new Date().toISOString()
     };
-    
+
+    console.log('[CareHub] Inserting client:', client);
+
     const { data, error } = await supabaseClient
         .from(TABLES.CLIENTS)
         .insert([client])
         .select()
         .single();
-    
+
     if (error) {
-        console.error('Error creating client:', error);
+        console.error('[CareHub] ERROR creating client:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+
+        // Check for missing column errors
+        if (error.message && error.message.includes('column')) {
+            const columnMatch = error.message.match(/column "([^"]+)"/);
+            if (columnMatch) {
+                console.error(`[CareHub] MISSING COLUMN: clients table needs column "${columnMatch[1]}"`);
+            }
+        }
+
         return null;
     }
-    
+
+    console.log('[CareHub] Client created successfully:', data);
+
+    // Update care request status to converted_to_client
+    console.log('[CareHub] Updating care request status to converted_to_client...');
+    const statusUpdated = await updateCareRequestStatus(careRequest.id, 'converted_to_client');
+    if (!statusUpdated) {
+        console.warn('[CareHub] Failed to update care request status, but client was created');
+    }
+
     // Create notification
-    await createNotification({
+    console.log('[CareHub] Creating notification for new client...');
+    const notification = await createNotification({
         type: 'client_created',
         title: 'New Client Added',
         message: `${client.first_name} ${client.last_name} has been added as a new client.`,
         related_id: data.id,
         related_type: 'client'
     });
-    
+
+    if (!notification) {
+        console.warn('[CareHub] Failed to create notification, but client was created');
+    }
+
     return data;
 }
 
@@ -510,24 +625,39 @@ async function updateClient(id, updates) {
  */
 async function createNotification(notification) {
     if (!supabaseClient) return null;
-    
+
     const notificationData = {
         ...notification,
         read: false,
         created_at: new Date().toISOString()
     };
-    
+
+    console.log('[CareHub] Creating notification:', notificationData);
+
     const { data, error } = await supabaseClient
         .from(TABLES.NOTIFICATIONS)
         .insert([notificationData])
         .select()
         .single();
-    
+
     if (error) {
-        console.error('Error creating notification:', error);
+        console.error('[CareHub] ERROR creating notification:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+        console.error('[CareHub] Error details:', error.details);
+
+        // Check for missing column errors
+        if (error.message && error.message.includes('column')) {
+            const columnMatch = error.message.match(/column "([^"]+)"/);
+            if (columnMatch) {
+                console.error(`[CareHub] MISSING COLUMN: notifications table needs column "${columnMatch[1]}"`);
+            }
+        }
+
         return null;
     }
-    
+
+    console.log('[CareHub] Notification created successfully:', data);
     return data;
 }
 
