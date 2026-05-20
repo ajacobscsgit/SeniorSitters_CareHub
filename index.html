@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SeniorSitters CareHub</title>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- Supabase CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+    <!-- Mobile Menu Toggle -->
+    <button class="mobile-menu-toggle" id="mobileMenuToggle">☰</button>
+
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h2>👴👵 SeniorSitters</h2>
+                <p>CareHub Portal</p>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-page="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span>Dashboard</span>
+                </button>
+                <button class="nav-item" data-page="applications">
+                    <span class="nav-icon">📝</span>
+                    <span>Applications</span>
+                </button>
+                <button class="nav-item" data-page="care-requests">
+                    <span class="nav-icon">🤝</span>
+                    <span>Care Requests</span>
+                </button>
+                <button class="nav-item" data-page="caregivers">
+                    <span class="nav-icon">👩‍⚕️</span>
+                    <span>Caregivers</span>
+                </button>
+                <button class="nav-item" data-page="clients">
+                    <span class="nav-icon">👥</span>
+                    <span>Clients</span>
+                </button>
+                <button class="nav-item" data-page="settings">
+                    <span class="nav-icon">⚙️</span>
+                    <span>Settings</span>
+                </button>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar">👤</div>
+                    <div class="user-details">
+                        <div class="user-name">Admin User</div>
+                        <div class="user-role">Administrator</div>
+                    </div>
+                </div>
+                <button class="logout-btn" id="logoutBtn">🚪 Logout</button>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content" id="mainContent">
+            <div class="loading-state" id="authLoading">
+                <div class="spinner"></div>
+                <p>Loading...</p>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal Container -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal" id="modal">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modalTitle">Details</h3>
+                <button class="modal-close" id="modalClose">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Modal content -->
+            </div>
+            <div class="modal-footer" id="modalFooter">
+                <!-- Modal actions -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts - Note: Supabase CDN is in head -->
+    <script src="js/config.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/database.js"></script>
+    <script src="js/app.js"></script>
+    <script>
+        // Protect route - check auth immediately
+        document.addEventListener('DOMContentLoaded', function() {
+            if (!requireAuth()) {
+                // Redirect handled in requireAuth
+                return;
+            }
+            // Auth passed, app.js will initialize
+        });
+    </script>
+</body>
+</html>
