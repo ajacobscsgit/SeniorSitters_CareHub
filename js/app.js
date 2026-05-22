@@ -132,7 +132,7 @@ async function renderDashboard() {
             <div class="stat-icon orange">🤝</div>
             <div class="stat-content">
                 <h3>${stats.pendingCareRequests}</h3>
-                <p>Pending Care Requests</p>
+                <p>New Care Requests</p>
             </div>
         </div>
         <div class="stat-card animate-fade-in">
@@ -327,10 +327,11 @@ async function loadCareRequests(filter = 'all') {
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>Client</th>
+                        <th>Requester</th>
                         <th>Email</th>
                         <th>Phone</th>
-                        <th>Care Needs</th>
+                        <th>Care For</th>
+                        <th>Location</th>
                         <th>Date Requested</th>
                         <th>Status</th>
                         <th>Actions</th>
@@ -339,10 +340,11 @@ async function loadCareRequests(filter = 'all') {
                 <tbody>
                     ${requests.map(req => `
                         <tr data-id="${req.id}">
-                            <td><strong>${escapeHtml(req.first_name)} ${escapeHtml(req.last_name)}</strong></td>
-                            <td>${escapeHtml(req.email)}</td>
+                            <td><strong>${escapeHtml(req.requester_name || 'N/A')}</strong></td>
+                            <td>${escapeHtml(req.email || 'N/A')}</td>
                             <td>${escapeHtml(req.phone || 'N/A')}</td>
-                            <td>${escapeHtml(truncate(req.care_needs, 30))}</td>
+                            <td>${escapeHtml(req.care_for || 'N/A')}</td>
+                            <td>${escapeHtml(req.location || 'N/A')}</td>
                             <td>${formatDate(req.created_at)}</td>
                             <td>${renderStatusBadge(req.status)}</td>
                             <td class="actions">
@@ -507,10 +509,10 @@ async function loadClients(filter = 'all') {
                 <tbody>
                     ${clients.map(client => `
                         <tr data-id="${client.id}">
-                            <td><strong>${escapeHtml(client.first_name)} ${escapeHtml(client.last_name)}</strong></td>
-                            <td>${escapeHtml(client.email)}</td>
+                            <td><strong>${escapeHtml(client.name || client.care_for || 'N/A')}</strong></td>
+                            <td>${escapeHtml(client.email || 'N/A')}</td>
                             <td>${escapeHtml(client.phone || 'N/A')}</td>
-                            <td>${escapeHtml(client.city)}, ${escapeHtml(client.state)}</td>
+                            <td>${escapeHtml(client.location || client.address || 'N/A')}</td>
                             <td>${renderStatusBadge(client.status)}</td>
                             <td class="actions">
                                 <button class="btn btn-sm btn-secondary" onclick="viewClient('${client.id}')">
@@ -610,29 +612,33 @@ async function viewCareRequest(id) {
     let actionButtons = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
 
     if (request.status === 'new') {
-        // Can move to reviewing or deny
         actionButtons += `
+            <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
             <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Deny</button>
             <button class="btn btn-warning" onclick="updateCareRequestStatusUI('${id}', 'reviewing')">Start Review</button>
         `;
     } else if (request.status === 'reviewing') {
-        // Can move to onboarding or deny
         actionButtons += `
+            <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
             <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Deny</button>
             <button class="btn btn-success" onclick="updateCareRequestStatusUI('${id}', 'onboarding')">Approve for Onboarding</button>
         `;
     } else if (request.status === 'onboarding') {
-        // Can mark approved (ready for conversion)
         actionButtons += `
+            <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
+            <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">Convert to Client</button>
             <button class="btn btn-success" onclick="updateCareRequestStatusUI('${id}', 'approved')">Complete Onboarding</button>
         `;
     } else if (request.status === 'approved') {
-        // Can convert to client
         actionButtons += `
+            <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
             <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">Convert to Client</button>
         `;
+    } else if (request.status !== 'converted_to_client') {
+        actionButtons += `
+            <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
+        `;
     }
-    // For 'denied' and 'converted_to_client' - no actions, just close
 
     modalFooter.innerHTML = actionButtons;
     openModal();
@@ -710,8 +716,12 @@ async function denyApplication(id) {
 }
 
 async function denyCareRequest(id) {
-    const notes = prompt('Optional: Add a note for why this care request was denied:');
+    const notes = prompt('Add a denial reason for this care request:');
     if (notes === null) return;
+    if (!notes.trim()) {
+        alert('Denial reason is required.');
+        return;
+    }
 
     const success = await updateCareRequestStatus(id, 'denied', notes);
     if (success) {
@@ -720,6 +730,21 @@ async function denyCareRequest(id) {
         loadPage('care-requests');
     } else {
         alert('Failed to deny care request');
+    }
+}
+
+async function addCareRequestAdminNotes(id) {
+    const currentNotes = currentData && currentData.admin_notes ? currentData.admin_notes : '';
+    const notes = prompt('Admin notes for this care request:', currentNotes);
+    if (notes === null) return;
+
+    const success = await updateCareRequestAdminNotes(id, notes);
+    if (success) {
+        alert('Admin notes saved.');
+        closeModal();
+        loadPage('care-requests');
+    } else {
+        alert('Failed to save admin notes');
     }
 }
 
@@ -735,20 +760,44 @@ async function updateCareRequestStatusUI(id, status) {
 }
 
 async function convertCareRequestToClient(id) {
+    if (!currentData || currentData.id !== id) {
+        currentData = await getCareRequestById(id);
+    }
+
+    if (!currentData) {
+        alert('Care request not found');
+        return;
+    }
+
+    if (currentData.status !== 'approved' && currentData.status !== 'onboarding') {
+        alert('Only approved or onboarding care requests can be converted to clients.');
+        return;
+    }
+
     if (!confirm('Are you sure you want to convert this care request to a client?')) {
         return;
     }
 
-    // Create client from care request
     const client = await createClientFromCareRequest(currentData);
     if (client) {
-        alert(`Care request converted! Client "${client.first_name} ${client.last_name}" has been created.`);
+        alert(`Care request converted! Client "${client.name || client.care_for || client.requester_name || 'New client'}" has been created.`);
     } else {
         alert('Failed to create client profile. Check console for errors.');
+        return;
     }
 
     closeModal();
-    loadPage('care-requests');
+    const refreshes = [];
+    if (document.getElementById('careRequestsContent')) {
+        refreshes.push(loadCareRequests('all'));
+    }
+    if (document.getElementById('clientsContent')) {
+        refreshes.push(loadClients('all'));
+    }
+    if (refreshes.length === 0) {
+        refreshes.push(currentPage === 'clients' ? loadClients('all') : loadCareRequests('all'));
+    }
+    await Promise.all(refreshes);
 }
 
 // ==================== MODAL FUNCTIONS ====================
@@ -919,11 +968,11 @@ function renderCareRequestDetails(req) {
             <div class="detail-grid">
                 <div class="detail-item">
                     <div class="detail-label">Full Name</div>
-                    <div class="detail-value">${escapeHtml(req.first_name)} ${escapeHtml(req.last_name)}</div>
+                    <div class="detail-value">${escapeHtml(req.requester_name || 'N/A')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Email</div>
-                    <div class="detail-value">${escapeHtml(req.email)}</div>
+                    <div class="detail-value">${escapeHtml(req.email || 'N/A')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Phone</div>
@@ -931,7 +980,11 @@ function renderCareRequestDetails(req) {
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Location</div>
-                    <div class="detail-value">${escapeHtml(req.city)}, ${escapeHtml(req.state)} ${escapeHtml(req.zip)}</div>
+                    <div class="detail-value">${escapeHtml(req.location || 'N/A')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Best Time to Contact</div>
+                    <div class="detail-value">${escapeHtml(req.best_time_to_contact || 'Not specified')}</div>
                 </div>
             </div>
         </div>
@@ -939,29 +992,53 @@ function renderCareRequestDetails(req) {
         <div class="detail-section">
             <h4>Care Details</h4>
             <div class="detail-grid">
+                <div class="detail-item">
+                    <div class="detail-label">Who Care Is For</div>
+                    <div class="detail-value">${escapeHtml(req.care_for || 'Not specified')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Start Timeframe</div>
+                    <div class="detail-value">${escapeHtml(req.start_timeframe || 'Not specified')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Preferred Days</div>
+                    <div class="detail-value">${escapeHtml(formatListValue(req.preferred_days) || 'Not specified')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Preferred Time Window</div>
+                    <div class="detail-value">${escapeHtml(req.preferred_time || 'Not specified')}</div>
+                </div>
                 <div class="detail-item" style="grid-column: 1 / -1;">
-                    <div class="detail-label">Care Needs</div>
-                    <div class="detail-value" style="white-space: pre-wrap;">${escapeHtml(req.care_needs || 'Not specified')}</div>
+                    <div class="detail-label">Type of Support Needed</div>
+                    <div class="detail-value" style="white-space: pre-wrap;">${escapeHtml(formatListValue(req.support_types) || 'Not specified')}</div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">Schedule Preference</div>
-                    <div class="detail-value">${escapeHtml(req.schedule_preference || 'Not specified')}</div>
+                    <div class="detail-label">Level of Support Needed</div>
+                    <div class="detail-value">${escapeHtml(req.level_of_care || 'Not specified')}</div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">Preferred Start Date</div>
-                    <div class="detail-value">${req.start_date ? formatDate(req.start_date) : 'Not specified'}</div>
+                    <div class="detail-label">Lives Alone</div>
+                    <div class="detail-value">${formatBoolean(req.lives_alone)}</div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">Budget Range</div>
-                    <div class="detail-value">${escapeHtml(req.budget_range || 'Not specified')}</div>
+                    <div class="detail-label">Pets in Home</div>
+                    <div class="detail-value">${formatBoolean(req.pets_in_home)}</div>
+                </div>
+                <div class="detail-item" style="grid-column: 1 / -1;">
+                    <div class="detail-label">Mobility / Safety Notes</div>
+                    <div class="detail-value" style="white-space: pre-wrap;">${escapeHtml(req.mobility_notes || 'Not provided')}</div>
+                </div>
+                <div class="detail-item" style="grid-column: 1 / -1;">
+                    <div class="detail-label">Main Concern or Goal</div>
+                    <div class="detail-value" style="white-space: pre-wrap;">${escapeHtml(req.main_concern || 'Not provided')}</div>
                 </div>
             </div>
         </div>
 
-        ${req.additional_notes ? `
+        ${req.notes ? `
         <div class="detail-section">
-            <h4>Client Notes</h4>
-            <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(req.additional_notes)}</p>
+            <h4>Additional Notes</h4>
+            <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(req.notes)}</p>
         </div>
         ` : ''}
 
@@ -976,12 +1053,6 @@ function renderCareRequestDetails(req) {
                     <div class="detail-label">Submitted</div>
                     <div class="detail-value">${formatDateTime(req.created_at)}</div>
                 </div>
-                ${req.approved_at ? `
-                <div class="detail-item">
-                    <div class="detail-label">Approved</div>
-                    <div class="detail-value">${formatDateTime(req.approved_at)}</div>
-                </div>
-                ` : ''}
                 ${req.converted_at ? `
                 <div class="detail-item">
                     <div class="detail-label">Converted to Client</div>
@@ -1109,11 +1180,11 @@ function renderClientDetails(client) {
             <div class="detail-grid">
                 <div class="detail-item">
                     <div class="detail-label">Full Name</div>
-                    <div class="detail-value">${escapeHtml(client.first_name)} ${escapeHtml(client.last_name)}</div>
+                    <div class="detail-value">${escapeHtml(client.name || client.care_for || 'N/A')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Email</div>
-                    <div class="detail-value">${escapeHtml(client.email)}</div>
+                    <div class="detail-value">${escapeHtml(client.email || 'N/A')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Phone</div>
@@ -1130,18 +1201,15 @@ function renderClientDetails(client) {
             <h4>Address</h4>
             <div class="detail-grid">
                 <div class="detail-item" style="grid-column: 1 / -1;">
-                    <div class="detail-value">${escapeHtml(client.address || 'Not provided')}</div>
-                </div>
-                <div class="detail-item">
-                    <div class="detail-value">${escapeHtml(client.city)}, ${escapeHtml(client.state)} ${escapeHtml(client.zip)}</div>
+                    <div class="detail-value">${escapeHtml(client.location || client.address || 'Not provided')}</div>
                 </div>
             </div>
         </div>
         
-        ${client.care_needs ? `
+        ${client.main_concern ? `
         <div class="detail-section">
-            <h4>Care Needs</h4>
-            <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(client.care_needs)}</p>
+            <h4>Main Concern</h4>
+            <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(client.main_concern)}</p>
         </div>
         ` : ''}
         
@@ -1190,6 +1258,11 @@ function truncate(text, maxLength) {
     return text.substring(0, maxLength) + '...';
 }
 
+function formatListValue(value) {
+    if (Array.isArray(value)) return value.join(', ');
+    return value || '';
+}
+
 // Export for use in HTML onclick handlers
 window.viewApplication = viewApplication;
 window.viewCareRequest = viewCareRequest;
@@ -1198,6 +1271,7 @@ window.viewClient = viewClient;
 window.approveApplication = approveApplication;
 window.denyApplication = denyApplication;
 window.denyCareRequest = denyCareRequest;
+window.addCareRequestAdminNotes = addCareRequestAdminNotes;
 window.updateCareRequestStatusUI = updateCareRequestStatusUI;
 window.convertCareRequestToClient = convertCareRequestToClient;
 window.closeModal = closeModal;

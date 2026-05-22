@@ -245,6 +245,45 @@ async function getCareRequestById(id) {
     return data;
 }
 
+async function createCareRequest(formData) {
+    if (!supabaseClient) return null;
+
+    const careRequest = {
+        requester_name: formData.requester_name || formData.full_name || '',
+        phone: formData.phone || '',
+        email: formData.email || '',
+        care_for: formData.care_for || '',
+        location: formData.location || '',
+        best_time_to_contact: formData.best_time_to_contact || '',
+        start_timeframe: formData.start_timeframe || '',
+        preferred_time: formData.preferred_time || '',
+        preferred_days: formData.preferred_days || null,
+        support_types: formData.support_types || null,
+        level_of_care: formData.level_of_care || '',
+        mobility_notes: formData.mobility_notes || '',
+        lives_alone: formData.lives_alone ?? null,
+        pets_in_home: formData.pets_in_home ?? null,
+        main_concern: formData.main_concern || '',
+        notes: formData.notes || '',
+        status: 'new',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.CARE_REQUESTS)
+        .insert([careRequest])
+        .select()
+        .single();
+
+    if (error) {
+        console.error('[CareHub] ERROR creating care request:', error);
+        return null;
+    }
+
+    return data;
+}
+
 /**
  * Update care request status
  * @param {string} id 
@@ -262,10 +301,6 @@ async function updateCareRequestStatus(id, status, notes = '') {
         updated_at: new Date().toISOString()
     };
 
-    // Track timestamps for key status changes
-    if (status === 'approved') {
-        updates.approved_at = new Date().toISOString();
-    }
     if (status === 'converted_to_client') {
         updates.converted_at = new Date().toISOString();
     }
@@ -299,6 +334,25 @@ async function updateCareRequestStatus(id, status, notes = '') {
     }
 
     console.log(`[CareHub] Care request ${id} updated to ${status} successfully`);
+    return true;
+}
+
+async function updateCareRequestAdminNotes(id, notes) {
+    if (!supabaseClient) return false;
+
+    const { error } = await supabaseClient
+        .from(TABLES.CARE_REQUESTS)
+        .update({
+            admin_notes: notes,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', id);
+
+    if (error) {
+        console.error('[CareHub] ERROR updating care request admin notes:', error);
+        return false;
+    }
+
     return true;
 }
 
@@ -521,25 +575,34 @@ async function getClientById(id) {
 async function createClientFromCareRequest(careRequest) {
     if (!supabaseClient) return null;
 
-    console.log('[CareHub] Creating client from care request:', careRequest.id, careRequest.first_name, careRequest.last_name);
+    if (careRequest.status !== 'approved' && careRequest.status !== 'onboarding') {
+        console.error('[CareHub] Care request must be approved or onboarding before conversion:', careRequest.status);
+        return null;
+    }
+
+    console.log('[CareHub] Creating client from care request:', careRequest.id, careRequest.requester_name);
 
     const client = {
-        first_name: careRequest.first_name,
-        last_name: careRequest.last_name,
-        email: careRequest.email,
-        phone: careRequest.phone,
-        address: careRequest.address,
-        city: careRequest.city,
-        state: careRequest.state,
-        zip: careRequest.zip,
-        status: 'active',
         care_request_id: careRequest.id,
-        care_needs: careRequest.care_needs || '',
-        schedule_preference: careRequest.schedule_preference || '',
-        budget_range: careRequest.budget_range || '',
-        start_date: careRequest.start_date,
-        notes: `Created from care request ${careRequest.id}. ${careRequest.additional_notes || ''}`,
-        created_at: new Date().toISOString()
+        requester_name: careRequest.requester_name,
+        phone: careRequest.phone,
+        email: careRequest.email,
+        care_for: careRequest.care_for,
+        location: careRequest.location,
+        preferred_days: careRequest.preferred_days,
+        preferred_time: careRequest.preferred_time,
+        support_types: careRequest.support_types,
+        level_of_care: careRequest.level_of_care,
+        mobility_notes: careRequest.mobility_notes,
+        lives_alone: careRequest.lives_alone,
+        pets_in_home: careRequest.pets_in_home,
+        main_concern: careRequest.main_concern,
+        notes: careRequest.notes,
+        admin_notes: careRequest.admin_notes,
+        status: 'active',
+        name: careRequest.care_for,
+        address: careRequest.location,
+        service_package: careRequest.support_types
     };
 
     console.log('[CareHub] Inserting client:', client);
@@ -573,6 +636,7 @@ async function createClientFromCareRequest(careRequest) {
     const statusUpdated = await updateCareRequestStatus(careRequest.id, 'converted_to_client');
     if (!statusUpdated) {
         console.warn('[CareHub] Failed to update care request status, but client was created');
+        return null;
     }
 
     // Create notification
@@ -580,7 +644,7 @@ async function createClientFromCareRequest(careRequest) {
     const notification = await createNotification({
         type: 'client_created',
         title: 'New Client Added',
-        message: `${client.first_name} ${client.last_name} has been added as a new client.`,
+        message: `${client.name || client.requester_name || 'A new client'} has been added as a new client.`,
         related_id: data.id,
         related_type: 'client'
     });
@@ -731,7 +795,7 @@ async function getDashboardStats() {
             { count: onboardingCaregivers }
         ] = await Promise.all([
             supabaseClient.from(TABLES.APPLICATIONS).select('*', { count: 'exact', head: true }).eq('status', 'new'),
-            supabaseClient.from(TABLES.CARE_REQUESTS).select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+            supabaseClient.from(TABLES.CARE_REQUESTS).select('*', { count: 'exact', head: true }).eq('status', 'new'),
             supabaseClient.from(TABLES.CAREGIVERS).select('*', { count: 'exact', head: true }),
             supabaseClient.from(TABLES.CLIENTS).select('*', { count: 'exact', head: true }),
             supabaseClient.from(TABLES.CAREGIVERS).select('*', { count: 'exact', head: true }).eq('status', 'onboarding')
@@ -764,7 +828,9 @@ if (typeof module !== 'undefined' && module.exports) {
         updateApplicationStatus,
         getCareRequests,
         getCareRequestById,
+        createCareRequest,
         updateCareRequestStatus,
+        updateCareRequestAdminNotes,
         getCaregivers,
         getCaregiverById,
         createCaregiverFromApplication,
