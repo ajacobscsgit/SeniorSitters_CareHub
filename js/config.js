@@ -11,7 +11,8 @@ window.TABLES = {
   CARE_REQUESTS: "care_requests",
   CAREGIVERS: "caregivers",
   CLIENTS: "clients",
-  NOTIFICATIONS: "notifications"
+  NOTIFICATIONS: "notifications",
+  SCHEDULES: "schedules"
 };
 
 window.ADMIN_CREDENTIALS = {
@@ -40,7 +41,14 @@ window.STATUS_CONFIG = {
   onboarding: { label: 'Onboarding', class: 'status-onboarding', icon: '📋' },
   approved: { label: 'Approved', class: 'status-approved', icon: '✓' },
   denied: { label: 'Denied', class: 'status-denied', icon: '✕' },
-  converted_to_client: { label: 'Converted', class: 'status-converted', icon: '✅' }
+  converted_to_client: { label: 'Converted', class: 'status-converted', icon: '✅' },
+
+  // Schedule statuses
+  scheduled: { label: 'Scheduled', class: 'status-scheduled', icon: '📅' },
+  in_progress: { label: 'In Progress', class: 'status-in-progress', icon: '🔄' },
+  completed: { label: 'Completed', class: 'status-completed', icon: '✓' },
+  cancelled: { label: 'Cancelled', class: 'status-cancelled', icon: '✕' },
+  no_show: { label: 'No Show', class: 'status-no-show', icon: '⚠️' }
 };
 
 // Navigation Items
@@ -50,6 +58,7 @@ window.NAV_ITEMS = [
   { id: 'care-requests', label: 'Care Requests', icon: '🤝' },
   { id: 'caregivers', label: 'Caregivers', icon: '👩‍⚕️' },
   { id: 'clients', label: 'Clients', icon: '👥' },
+  { id: 'schedules', label: 'Schedules', icon: '📅' },
   { id: 'settings', label: 'Settings', icon: '⚙️' }
 ];
 

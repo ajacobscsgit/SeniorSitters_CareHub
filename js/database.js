@@ -500,19 +500,44 @@ async function createCaregiverFromApplication(application) {
  */
 async function updateCaregiver(id, updates) {
     if (!supabaseClient) return false;
-    
-    updates.updated_at = new Date().toISOString();
-    
+
+    console.log('[CareHub] updateCaregiver called with id:', id);
+
+    // Whitelist only columns that exist in caregivers table
+    const allowedColumns = [
+        'status',
+        'pay_rate',
+        'background_check_status',
+        'training_status',
+        'documents_status',
+        'welcome_package_status',
+        'notes'
+    ];
+
+    // Filter updates to only include allowed columns
+    const filteredUpdates = {};
+    for (const key of allowedColumns) {
+        if (updates.hasOwnProperty(key)) {
+            filteredUpdates[key] = updates[key];
+        }
+    }
+
+    console.log('[CareHub] Filtered updates object:', filteredUpdates);
+
     const { error } = await supabaseClient
         .from(TABLES.CAREGIVERS)
-        .update(updates)
+        .update(filteredUpdates)
         .eq('id', id);
-    
+
     if (error) {
-        console.error('Error updating caregiver:', error);
+        console.error('[CareHub] ERROR updating caregiver:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+        console.error('[CareHub] Error details:', error.details);
         return false;
     }
-    
+
+    console.log('[CareHub] Caregiver updated successfully');
     return true;
 }
 
@@ -820,6 +845,202 @@ async function getDashboardStats() {
     }
 }
 
+// ==================== SCHEDULES ====================
+
+/**
+ * Get all schedules with optional filters
+ * @param {Object} filters - Optional filters (date_from, date_to, status, caregiver_id, client_id)
+ * @returns {Promise<Array>}
+ */
+async function getSchedules(filters = {}) {
+    if (!supabaseClient) return [];
+
+    let query = supabaseClient
+        .from(TABLES.SCHEDULES)
+        .select(`
+            *,
+            caregiver:caregivers!caregiver_id(name),
+            client:clients!client_id(name, care_for)
+        `)
+        .order('date', { ascending: true })
+        .order('start_time', { ascending: true });
+
+    if (filters.date_from) {
+        query = query.gte('date', filters.date_from);
+    }
+    if (filters.date_to) {
+        query = query.lte('date', filters.date_to);
+    }
+    if (filters.status) {
+        query = query.eq('status', filters.status);
+    }
+    if (filters.caregiver_id) {
+        query = query.eq('caregiver_id', filters.caregiver_id);
+    }
+    if (filters.client_id) {
+        query = query.eq('client_id', filters.client_id);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+        console.error('[CareHub] Error fetching schedules:', error);
+        return [];
+    }
+
+    return data || [];
+}
+
+/**
+ * Get schedule by ID
+ * @param {string} id
+ * @returns {Promise<Object|null>}
+ */
+async function getScheduleById(id) {
+    if (!supabaseClient) return null;
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .select(`
+            *,
+            caregiver:caregivers!caregiver_id(name),
+            client:clients!client_id(name, care_for)
+        `)
+        .eq('id', id)
+        .single();
+
+    if (error) {
+        console.error('[CareHub] Error fetching schedule:', error);
+        return null;
+    }
+
+    return data;
+}
+
+/**
+ * Create a new schedule
+ * @param {Object} scheduleData
+ * @returns {Promise<Object|null>}
+ */
+async function createSchedule(scheduleData) {
+    if (!supabaseClient) return null;
+
+    const schedule = {
+        caregiver_id: scheduleData.caregiver_id,
+        client_id: scheduleData.client_id,
+        date: scheduleData.date,
+        start_time: scheduleData.start_time,
+        end_time: scheduleData.end_time,
+        status: scheduleData.status || 'scheduled',
+        service_type: scheduleData.service_type || '',
+        location: scheduleData.location || '',
+        notes: scheduleData.notes || '',
+        created_by: scheduleData.created_by || 'admin'
+    };
+
+    console.log('[CareHub] Creating schedule:', schedule);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .insert([schedule])
+        .select()
+        .single();
+
+    if (error) {
+        console.error('[CareHub] ERROR creating schedule:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+        return null;
+    }
+
+    console.log('[CareHub] Schedule created successfully:', data);
+    return data;
+}
+
+/**
+ * Update schedule
+ * @param {string} id
+ * @param {Object} updates
+ * @returns {Promise<boolean>}
+ */
+async function updateSchedule(id, updates) {
+    if (!supabaseClient) return false;
+
+    console.log('[CareHub] updateSchedule called with id:', id);
+
+    // Whitelist only columns that exist in schedules table
+    const allowedColumns = [
+        'caregiver_id',
+        'client_id',
+        'date',
+        'start_time',
+        'end_time',
+        'status',
+        'service_type',
+        'location',
+        'notes'
+    ];
+
+    // Filter updates to only include allowed columns
+    const filteredUpdates = {};
+    for (const key of allowedColumns) {
+        if (updates.hasOwnProperty(key)) {
+            filteredUpdates[key] = updates[key];
+        }
+    }
+
+    console.log('[CareHub] Filtered updates object:', filteredUpdates);
+
+    const { error } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .update(filteredUpdates)
+        .eq('id', id);
+
+    if (error) {
+        console.error('[CareHub] ERROR updating schedule:', error);
+        console.error('[CareHub] Error code:', error.code);
+        console.error('[CareHub] Error message:', error.message);
+        console.error('[CareHub] Error details:', error.details);
+        return false;
+    }
+
+    console.log('[CareHub] Schedule updated successfully');
+    return true;
+}
+
+/**
+ * Cancel a schedule
+ * @param {string} id
+ * @param {string} reason - Optional cancellation reason
+ * @returns {Promise<boolean>}
+ */
+async function cancelSchedule(id, reason = '') {
+    if (!supabaseClient) return false;
+
+    console.log('[CareHub] Cancelling schedule:', id);
+
+    const updates = {
+        status: 'cancelled'
+    };
+
+    if (reason) {
+        updates.notes = reason;
+    }
+
+    const { error } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .update(updates)
+        .eq('id', id);
+
+    if (error) {
+        console.error('[CareHub] ERROR cancelling schedule:', error);
+        return false;
+    }
+
+    console.log('[CareHub] Schedule cancelled successfully');
+    return true;
+}
+
 // Export for use in other modules
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
@@ -839,6 +1060,11 @@ if (typeof module !== 'undefined' && module.exports) {
         getClientById,
         createClientFromCareRequest,
         updateClient,
+        getSchedules,
+        getScheduleById,
+        createSchedule,
+        updateSchedule,
+        cancelSchedule,
         getDashboardStats,
         getUnreadNotifications,
         createNotification
