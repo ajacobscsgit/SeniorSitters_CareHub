@@ -547,6 +547,102 @@
         .rb-fam    svg { stroke: #9333EA; }
 
         /* ─────────────────────────────────────────
+           FORGOT PASSWORD
+        ───────────────────────────────────────── */
+        .forgot-link-row {
+            text-align: right;
+            margin-top: -6px;
+        }
+        .forgot-link {
+            font-size: 12.5px;
+            font-weight: 500;
+            color: var(--blue);
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0;
+            font-family: inherit;
+            text-decoration: none;
+            transition: color .15s;
+        }
+        .forgot-link:hover { color: var(--blue-hover); text-decoration: underline; }
+
+        /* inline forgot-password panel */
+        #forgotPanel {
+            display: none;
+            margin-top: 20px;
+            padding: 16px;
+            background: var(--blue-light);
+            border: 1.5px solid rgba(29,111,232,.18);
+            border-radius: var(--radius);
+            animation: alertIn .2s ease both;
+        }
+        #forgotPanel p {
+            font-size: 12.5px;
+            color: var(--gray-700);
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+        .forgot-input-row {
+            display: flex;
+            gap: 8px;
+        }
+        .forgot-input-row input {
+            flex: 1;
+            height: 38px;
+            padding: 0 12px;
+            border: 1.5px solid var(--gray-200);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-family: inherit;
+            color: var(--gray-900);
+            background: var(--white);
+            outline: none;
+            transition: border-color .18s, box-shadow .18s;
+        }
+        .forgot-input-row input:focus {
+            border-color: var(--blue);
+            box-shadow: 0 0 0 3px var(--blue-glow);
+        }
+        .forgot-send-btn {
+            height: 38px;
+            padding: 0 14px;
+            background: var(--blue);
+            color: #fff;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 12.5px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background .15s;
+        }
+        .forgot-send-btn:hover:not(:disabled) { background: var(--blue-hover); }
+        .forgot-send-btn:disabled { opacity: .6; cursor: not-allowed; }
+        .forgot-cancel-btn {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--gray-400);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+            padding: 0;
+        }
+        .forgot-cancel-btn:hover { color: var(--gray-700); }
+        .forgot-msg {
+            display: none;
+            font-size: 12.5px;
+            font-weight: 500;
+            margin-top: 8px;
+            padding: 6px 10px;
+            border-radius: var(--radius-sm);
+        }
+        .forgot-msg.ok  { display: block; background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
+        .forgot-msg.err { display: block; background: var(--error-bg);   color: var(--error);   border: 1px solid var(--error-border); }
+
+        /* ─────────────────────────────────────────
            FOOTER
         ───────────────────────────────────────── */
         .auth-footer {
@@ -683,6 +779,21 @@
                 </button>
             </form>
 
+            <!-- Forgot password link + inline panel -->
+            <div class="forgot-link-row">
+                <button class="forgot-link" type="button" id="forgotToggle">Forgot password?</button>
+            </div>
+
+            <div id="forgotPanel">
+                <p>Enter your email address and we&rsquo;ll send you a password reset link.</p>
+                <div class="forgot-input-row">
+                    <input type="email" id="forgotEmail" placeholder="you@example.com" autocomplete="email">
+                    <button class="forgot-send-btn" type="button" id="forgotSendBtn">Send link</button>
+                </div>
+                <div class="forgot-msg" id="forgotMsg"></div>
+                <button class="forgot-cancel-btn" type="button" id="forgotCancel">Cancel</button>
+            </div>
+
             <!-- Demo accounts — only visible when DEV_MODE = true -->
             <div id="demoSection" style="display:none;">
                 <div class="demo-sep">
@@ -740,9 +851,34 @@
 
 </div><!-- /.lp-wrap -->
 
+<!-- Supabase CDN — must load before config.js and supabase-auth.js -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="js/config.js"></script>
 <script src="js/supabase-auth.js"></script>
 <script src="js/auth.js"></script>
+<script>
+    // Sanity-check: verify Supabase client initialised correctly.
+    // _db() in supabase-auth.js creates window.carehubSupabase lazily on first call,
+    // so we trigger it here to catch any missing CDN / config issues early.
+    (function() {
+        if (!window.supabase) {
+            console.error('[CareHub] Supabase CDN not loaded on login page — window.supabase is undefined.');
+            return;
+        }
+        if (!window.CAREHUB_CONFIG || !window.CAREHUB_CONFIG.SUPABASE_URL) {
+            console.error('[CareHub] CAREHUB_CONFIG missing on login page — check js/config.js loaded correctly.');
+            return;
+        }
+        // Force client creation so window.carehubSupabase is ready before form submit
+        if (!window.carehubSupabase) {
+            window.carehubSupabase = window.supabase.createClient(
+                window.CAREHUB_CONFIG.SUPABASE_URL,
+                window.CAREHUB_CONFIG.SUPABASE_ANON_KEY
+            );
+        }
+        if (window.DEBUG === true) console.log('[CareHub] Supabase client ready on login page.');
+    })();
+</script>
 <script>
     // Show demo section only in DEV_MODE
     if (window.DEV_MODE === true) {
@@ -753,6 +889,133 @@
     if (isAuthenticated()) {
         window.location.href = 'index.html';
     }
+
+    /* ── forgot password panel ── */
+    (function () {
+        var toggle  = document.getElementById('forgotToggle');
+        var panel   = document.getElementById('forgotPanel');
+        var cancel  = document.getElementById('forgotCancel');
+        var sendBtn = document.getElementById('forgotSendBtn');
+        var msgEl   = document.getElementById('forgotMsg');
+        var input   = document.getElementById('forgotEmail');
+
+        function openPanel() {
+            panel.style.display = 'block';
+            msgEl.className = 'forgot-msg';
+            msgEl.textContent = '';
+            input.value = '';
+            setTimeout(function () { input.focus(); }, 60);
+        }
+        function closePanel() {
+            panel.style.display = 'none';
+        }
+
+        toggle.addEventListener('click', function () {
+            if (panel.style.display === 'none' || !panel.style.display) {
+                openPanel();
+            } else {
+                closePanel();
+            }
+        });
+        cancel.addEventListener('click', closePanel);
+
+        // Helper: detect Supabase email rate-limit messages
+        function isForgotRateLimit(msg) {
+            if (!msg) return false;
+            var m = msg.toLowerCase();
+            return (
+                m.includes('rate limit') ||
+                m.includes('too many requests') ||
+                m.includes('email rate limit exceeded') ||
+                m.includes('for security purposes') ||
+                m.includes('over_email_send_rate_limit')
+            );
+        }
+
+        // Helper: disable sendBtn with a live countdown, then re-enable
+        function startForgotCooldown(seconds) {
+            var remaining = seconds;
+            sendBtn.disabled = true;
+            function tick() {
+                sendBtn.textContent = 'Wait ' + remaining + 's…';
+                if (remaining <= 0) {
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Send link';
+                    return;
+                }
+                remaining--;
+                setTimeout(tick, 1000);
+            }
+            tick();
+        }
+
+        sendBtn.addEventListener('click', async function () {
+            var email = (input.value || '').trim();
+            msgEl.className = 'forgot-msg';
+            msgEl.textContent = '';
+
+            if (!email) {
+                msgEl.className = 'forgot-msg err';
+                msgEl.textContent = 'Please enter your email address.';
+                input.focus();
+                return;
+            }
+
+            // Prevent click if already in cooldown
+            if (sendBtn.disabled) return;
+
+            sendBtn.disabled = true;
+            sendBtn.textContent = 'Sending…';
+
+            try {
+                // Build redirect URL pointing to reset-password.html
+                var origin = window.location.origin || (window.location.protocol + '//' + window.location.host);
+                var redirectTo = origin + '/reset-password.html';
+
+                // Use the shared Supabase client from supabase-auth.js if available,
+                // otherwise create a minimal one inline.
+                var db = window.carehubSupabase;
+                if (!db && window.supabase && window.CAREHUB_CONFIG) {
+                    db = window.supabase.createClient(
+                        window.CAREHUB_CONFIG.SUPABASE_URL,
+                        window.CAREHUB_CONFIG.SUPABASE_ANON_KEY
+                    );
+                }
+
+                if (!db) {
+                    throw new Error('Auth client unavailable.');
+                }
+
+                var result = await db.auth.resetPasswordForEmail(email, { redirectTo: redirectTo });
+
+                if (result.error) {
+                    throw result.error;
+                }
+
+                msgEl.className = 'forgot-msg ok';
+                msgEl.textContent = 'Reset link sent! Check your inbox (and spam folder).';
+                sendBtn.textContent = 'Sent';
+                // Re-enable after a short delay so user can't spam
+                setTimeout(function () {
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Send link';
+                }, 30000);
+            } catch (err) {
+                if (window.DEBUG === true) console.error('[ForgotPassword] Supabase error:', err);
+
+                if (isForgotRateLimit(err && err.message)) {
+                    msgEl.className = 'forgot-msg err';
+                    msgEl.textContent = 'Too many email links were sent. Please wait before trying again.';
+                    startForgotCooldown(120);
+                } else {
+                    msgEl.className = 'forgot-msg err';
+                    msgEl.textContent = (err && err.message) ? err.message : 'Failed to send reset email. Please try again.';
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Send link';
+                }
+            }
+        });
+    }());
 
     /* ── alert helpers ── */
     function showAlert(msg, type) {

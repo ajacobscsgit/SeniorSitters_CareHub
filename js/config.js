@@ -8,11 +8,16 @@ window.DEBUG = false;
 // DEV_MODE = true  → demo/mock login buttons are visible; DEMO_USERS are accepted.
 // DEV_MODE = false → only real Supabase Auth is accepted; demo buttons are hidden.
 // IMPORTANT: Set to false before deploying to production.
-window.DEV_MODE = true;
+window.DEV_MODE = false;
 
 window.CAREHUB_CONFIG = {
   SUPABASE_URL: "https://zyoozdgdiwopgwstiugu.supabase.co",
-  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp5b296ZGdkaXdvcGd3c3RpdWd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMzAyNDMsImV4cCI6MjA5MzYwNjI0M30.T32uwCGaZo1YkqzIaRN_7eyjzPshXdmcHPFDdM7MH7w"
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp5b296ZGdkaXdvcGd3c3RpdWd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMzAyNDMsImV4cCI6MjA5MzYwNjI0M30.T32uwCGaZo1YkqzIaRN_7eyjzPshXdmcHPFDdM7MH7w",
+
+  // Set to true ONLY after supabase/functions/invite-user has been deployed.
+  // false = inviteUser() queues a pending_invite profile row but sends NO email.
+  // true  = inviteUser() calls the Edge Function, creates a real auth account, and sends the invite email.
+  EDGE_FUNCTION_DEPLOYED: false
 };
 
 window.TABLES = {
@@ -151,10 +156,15 @@ window.STATUS_CONFIG = {
   approved: { label: 'Approved', class: 'status-approved', icon: '✓' },
   denied: { label: 'Denied', class: 'status-denied', icon: '✕' },
 
-  // Caregiver statuses
+  // Caregiver employment statuses
   onboarding: { label: 'Onboarding', class: 'status-onboarding', icon: '📋' },
   active: { label: 'Active', class: 'status-active', icon: '●' },
   inactive: { label: 'Inactive', class: 'status-inactive', icon: '○' },
+
+  // Caregiver portal account_status
+  approved_no_invite: { label: 'No Invite Sent',   class: 'status-pending',    icon: '○' },
+  pending_invite:     { label: 'Invite Queued',     class: 'status-reviewing',  icon: '⏳' },
+  invite_sent:        { label: 'Invite Sent',       class: 'status-onboarding', icon: '✉' },
 
   // Client statuses
   // active and inactive reused from above

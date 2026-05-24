@@ -263,17 +263,164 @@ await supabase.auth.resetPasswordForEmail(email, {
 
 ---
 
+## Edge Function Deployment Steps
+
+Follow these steps **exactly** when you are ready to send real invite emails.
+
+> **Do not do this yet if Supabase email rate limits are still a concern.**
+> `EDGE_FUNCTION_DEPLOYED = false` keeps the system safe — no emails are sent.
+
+### Prerequisites
+- [ ] Supabase CLI installed: `npm install -g supabase`
+- [ ] Logged in: `supabase login`
+- [ ] Project linked: `supabase link --project-ref zyoozdgdiwopgwstiugu`
+- [ ] `profiles` table created in Supabase (SQL in `AUTH_SETUP.md`)
+- [ ] At least one `admin_owner` profile row inserted
+
+### Step 1 — Set secrets (run once, never commit these values)
+
+```bash
+supabase secrets set SUPABASE_SERVICE_ROLE_KEY=<your-service-role-key>
+supabase secrets set SITE_URL=http://127.0.0.1:5500
+```
+
+Find your service role key:
+`Supabase Dashboard → Project Settings → API → service_role (secret)`
+
+> ⚠️ Never paste the service role key into any `.js`, `.html`, or `.env` file
+> that is committed to git or loaded in a browser.
+
+### Step 2 — Deploy the Edge Function
+
+```bash
+supabase functions deploy invite-user
+```
+
+Expected output:
+```
+Deploying Function: invite-user
+Done: https://zyoozdgdiwopgwstiugu.supabase.co/functions/v1/invite-user
+```
+
+### Step 3 — Test without sending emails (dry run)
+
+Use `curl` or a REST client to verify the function is reachable.
+Replace `<admin_access_token>` with a real JWT from an active admin session
+(copy from browser DevTools → Application → `carehub_session` → check Supabase
+session via `supabase.auth.getSession()`).
+
+```bash
+curl -X POST https://zyoozdgdiwopgwstiugu.supabase.co/functions/v1/invite-user \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test-dry-run@example.com","role":"caregiver","full_name":"Test User","caregiver_id":null,"client_id":null}'
+```
+
+Expected response before sending to a real address:
+```json
+{ "success": true, "user_id": "uuid..." }
+```
+
+> **If you get a rate limit error (HTTP 429):** Wait at least 1 hour before
+> retrying. Supabase free tier limits invite emails to ~3–4 per hour.
+
+### Step 4 — Flip the frontend flag
+
+In `js/config.js`, change:
+```js
+EDGE_FUNCTION_DEPLOYED: false   // ← change to true
+```
+to:
+```js
+EDGE_FUNCTION_DEPLOYED: true
+```
+
+The "Queue Invite" button in Settings will become "Send Invite" and will
+call the deployed Edge Function on submit.
+
+### Step 5 — Update SITE_URL for production
+
+When deploying to your live domain, re-set the secret:
+```bash
+supabase secrets set SITE_URL=https://your-portal-domain.com
+```
+
+---
+
+## Frontend Call Reference (already implemented in `supabase-auth.js`)
+
+```js
+// In any admin context — e.g. after approving an application:
+const result = await window.SupabaseAuth.inviteUser({
+    email:        'jane@example.com',
+    role:         'caregiver',          // or 'client_family' or 'co_owner'
+    full_name:    'Jane Doe',
+    caregiver_id: 'uuid-of-caregiver-row',  // required for role=caregiver
+    client_id:    null
+});
+
+if (result.success) {
+    // Email sent, auth account created
+} else if (result.pending) {
+    // Edge Function not yet deployed — profile queued, no email sent
+} else if (result.code === 'RATE_LIMIT') {
+    // Show friendly "wait a few minutes" message
+} else if (result.code === 'EMAIL_EXISTS') {
+    // User already has an account
+} else {
+    // result.error contains the message
+}
+```
+
+---
+
+## Invite Architecture: Two-Table Design
+
+Placeholder invites (before Edge Function is deployed) and real invites are
+kept in **separate tables** by design:
+
+| Table | Contains | When populated |
+|---|---|---|
+| `pending_invites` | Queued invite intentions | `EDGE_FUNCTION_DEPLOYED = false` (placeholder mode) |
+| `profiles` | Real CareHub users only | After Edge Function creates `auth.users` entry |
+
+**Why separate tables?**
+- `profiles` has a `NOT NULL` FK to `auth.users(id)` — no fake UUIDs allowed.
+- `profiles` is protected by strict RLS; inserting without a real auth session violates the policy.
+- `pending_invites` has its own permissive insert RLS for `admin_owner`/`co_owner`.
+- This prevents the "new row violates row-level security policy for table profiles" error.
+
+**Duplicate check order** (in `_invitePlaceholder()`):
+1. `profiles.email` — already has a real account → return `EMAIL_EXISTS`
+2. `pending_invites.email` — already queued → return `EMAIL_EXISTS`
+3. Insert into `pending_invites` with `status = 'pending'`
+
+**Migration file:** `supabase/migrations/20260524_create_pending_invites.sql`
+
+Run in Supabase Dashboard → SQL Editor before using placeholder mode.
+
+---
+
 ## Current Status
 
 | Step | Status |
 |---|---|
 | `supabase-auth.js` created | ✅ Done |
-| `inviteUser()` placeholder | ✅ Done (inserts pending_invite profile row) |
+| `inviteUser()` — Edge Function path | ✅ Done |
+| `inviteUser()` — placeholder path (pending_invites) | ✅ Done |
+| `EDGE_FUNCTION_DEPLOYED` flag in `config.js` | ✅ Done (currently `false`) |
 | `approveApplication` wired | ✅ Done |
 | `convertCareRequestToClient` wired | ✅ Done |
-| Edge Function skeleton | ✅ Documented above |
-| Edge Function deployed | ⏳ Pending |
-| Co-owner invite UI in Settings | ⏳ Pending |
-| "Forgot password" link | ⏳ Pending |
-| `profiles` table created in Supabase | ⏳ Pending |
+| Edge Function code (`supabase/functions/invite-user/index.ts`) | ✅ Done |
+| Co-owner / caregiver / client_family invite UI in Settings | ✅ Done (`js/invite-user.js`) |
+| Settings invite table reads from `pending_invites` | ✅ Done |
+| "Forgot password?" link on `login.html` | ✅ Done |
+| `accept-invite.html` + `reset-password.html` | ✅ Done |
+| `js/password-reset.js` | ✅ Done |
+| `pending_invites` table migration created | ✅ Done (`supabase/migrations/20260524_create_pending_invites.sql`) |
+| `pending_invites` table created in Supabase | ⏳ Pending — run the migration SQL |
+| Edge Function deployed to Supabase | ⏳ Pending (see deployment steps above) |
+| `EDGE_FUNCTION_DEPLOYED` set to `true` | ⏳ Pending (after deploy) |
+| `profiles` table created in Supabase | ⏳ Pending (SQL in `AUTH_SETUP.md`) |
 | First admin profile row inserted | ⏳ Pending |
+| RLS policies enabled | ⏳ Pending (see `SUPABASE_RLS_PLAN.md`) |

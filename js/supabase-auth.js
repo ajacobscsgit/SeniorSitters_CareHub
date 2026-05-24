@@ -29,6 +29,35 @@
     'use strict';
 
     // =========================================================================
+    // UTILITIES
+    // =========================================================================
+
+    /**
+     * Log only when window.DEBUG is true.
+     */
+    function _debugLog(...args) {
+        if (window.DEBUG === true) console.log('[SupabaseAuth]', ...args);
+    }
+
+    /**
+     * Detect Supabase email rate-limit errors from a message string.
+     * Supabase uses multiple phrasings across versions.
+     * @param {string} msg
+     * @returns {boolean}
+     */
+    function _isRateLimit(msg) {
+        if (!msg) return false;
+        const m = msg.toLowerCase();
+        return (
+            m.includes('rate limit') ||
+            m.includes('too many requests') ||
+            m.includes('email rate limit exceeded') ||
+            m.includes('for security purposes') ||
+            m.includes('over_email_send_rate_limit')
+        );
+    }
+
+    // =========================================================================
     // CLIENT REFERENCE
     // =========================================================================
 
@@ -172,87 +201,228 @@
     }
 
     // =========================================================================
-    // USER INVITE (PLACEHOLDER — requires Edge Function / service-role key)
+    // USER INVITE
     // =========================================================================
 
     /**
-     * Invite a user to CareHub by creating a Supabase Auth account and
-     * a matching profiles row.
+     * Invite a user to CareHub.
      *
-     * IMPORTANT: The Supabase JS client's anon key CANNOT create auth users
-     * via admin APIs. This function is a documented placeholder.
+     * Routing:
+     *   EDGE_FUNCTION_DEPLOYED = true  → calls supabase/functions/invite-user
+     *                                    (creates real auth account + sends email)
+     *   EDGE_FUNCTION_DEPLOYED = false → inserts a pending_invite profile row
+     *                                    only (no email sent; safe for dev)
      *
-     * Production implementation options:
-     *   A) Supabase Edge Function (recommended):
-     *      POST /functions/v1/invite-user
-     *      { email, role, full_name, caregiver_id?, client_id? }
-     *      The Edge Function uses the SERVICE_ROLE key to call
-     *      supabase.auth.admin.inviteUserByEmail() and inserts the profile row.
+     * The flag is read from window.CAREHUB_CONFIG.EDGE_FUNCTION_DEPLOYED.
+     * Set it to true in config.js ONLY after the function has been deployed.
      *
-     *   B) Server-side API route (Node/Express):
-     *      Same logic, using @supabase/supabase-js with service role key.
+     * Permission enforcement is also done server-side in the Edge Function.
+     * The frontend layer here is an additional UX guard only.
      *
-     * For now, this function:
-     *   1. Logs the invite payload to the console.
-     *   2. Returns { success: false, pending: true } so the caller can show
-     *      a "Invite pending — implement Edge Function" message.
-     *   3. Inserts the profile row WITHOUT creating the auth user, so the
-     *      admin can see the pending account and retry when the Edge Function
-     *      is deployed.
-     *
-     * @param {Object} opts
-     * @param {string} opts.email
-     * @param {string} opts.role         – 'caregiver' | 'client_family' | 'co_owner'
-     * @param {string} opts.full_name
+     * @param {Object}      opts
+     * @param {string}      opts.email
+     * @param {string}      opts.role          'caregiver' | 'client_family' | 'co_owner'
+     * @param {string}      opts.full_name
      * @param {string|null} [opts.caregiver_id]
      * @param {string|null} [opts.client_id]
-     * @returns {Promise<{ success: boolean, pending?: boolean, error?: string }>}
+     * @returns {Promise<{
+     *   success:  boolean,
+     *   pending?: boolean,
+     *   code?:    string,
+     *   error?:   string,
+     *   message?: string
+     * }>}
      */
     async function inviteUser({ email, role, full_name, caregiver_id = null, client_id = null }) {
         const db = _db();
         if (!db) return { success: false, error: 'Supabase client not available.' };
 
-        console.log('[SupabaseAuth] inviteUser called (placeholder):', { email, role, full_name, caregiver_id, client_id });
-
-        // ── Step 1: Insert a pending profile row ─────────────────────────────
-        // We use a sentinel id (random UUID v4 substitute) so the row exists
-        // even before auth.users has a matching entry.
-        // When the Edge Function is implemented, it should UPDATE this row with
-        // the real auth.users id after creating the auth account.
-        const sentinelId = _uuidv4();
-
-        const profilePayload = {
-            id:           sentinelId,
-            email:        email.trim().toLowerCase(),
-            full_name:    full_name || email,
-            role:         role,
-            caregiver_id: caregiver_id,
-            client_id:    client_id,
-            status:       'pending_invite',
-            created_at:   new Date().toISOString(),
-            updated_at:   new Date().toISOString()
-        };
-
-        const { error: profileError } = await db
-            .from('profiles')
-            .upsert(profilePayload, { onConflict: 'email' });
-
-        if (profileError) {
-            console.error('[SupabaseAuth] Failed to insert pending profile:', profileError);
-            // Non-fatal — still return pending so caller can inform admin
+        // ── Input validation (frontend guard) ─────────────────────────────────
+        if (!email || !email.trim()) {
+            return { success: false, error: 'Email address is required.' };
+        }
+        if (!role) {
+            return { success: false, error: 'Role is required.' };
+        }
+        if (!full_name || !full_name.trim()) {
+            return { success: false, error: 'Full name is required.' };
         }
 
-        // ── Step 2: Document what the Edge Function needs to do ───────────────
-        console.info(
-            '[SupabaseAuth] TODO — deploy Edge Function to complete invite.\n' +
-            'Payload for supabase.auth.admin.inviteUserByEmail():\n',
-            JSON.stringify({ email, data: { role, full_name, caregiver_id, client_id } }, null, 2)
+        const INVITABLE_ROLES = ['co_owner', 'caregiver', 'client_family'];
+        if (!INVITABLE_ROLES.includes(role)) {
+            return { success: false, error: `Invalid role: "${role}".` };
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+
+        // ── Route: Edge Function (production) ────────────────────────────────
+        const edgeDeployed = !!(
+            window.CAREHUB_CONFIG &&
+            window.CAREHUB_CONFIG.EDGE_FUNCTION_DEPLOYED === true
         );
+
+        if (edgeDeployed) {
+            return _inviteViaEdgeFunction(db, { email: normalizedEmail, role, full_name, caregiver_id, client_id });
+        }
+
+        // ── Route: Placeholder (pre-deployment) ───────────────────────────────
+        return _invitePlaceholder(db, { email: normalizedEmail, role, full_name, caregiver_id, client_id });
+    }
+
+    /**
+     * Call the deployed invite-user Edge Function.
+     * @private
+     */
+    async function _inviteViaEdgeFunction(db, { email, role, full_name, caregiver_id, client_id }) {
+        const { data: { session } } = await db.auth.getSession();
+        if (!session) {
+            return { success: false, error: 'Not authenticated. Please sign in again.' };
+        }
+
+        let response, result;
+        try {
+            response = await fetch(
+                `${window.CAREHUB_CONFIG.SUPABASE_URL}/functions/v1/invite-user`,
+                {
+                    method:  'POST',
+                    headers: {
+                        'Content-Type':  'application/json',
+                        'Authorization': `Bearer ${session.access_token}`
+                    },
+                    body: JSON.stringify({ email, role, full_name, caregiver_id, client_id })
+                }
+            );
+            result = await response.json();
+        } catch (err) {
+            console.error('[SupabaseAuth] Edge Function fetch error:', err);
+            return { success: false, error: 'Could not reach the invite service. Check your connection.' };
+        }
+
+        if (!response.ok) {
+            const code = result?.code || null;
+            const msg  = result?.error || `Invite failed (HTTP ${response.status}).`;
+
+            _debugLog('Edge Function error response:', { status: response.status, code, msg });
+
+            // Map specific codes to friendly messages
+            if (code === 'RATE_LIMIT' || response.status === 429 || _isRateLimit(msg)) {
+                return {
+                    success: false,
+                    code:    'RATE_LIMIT',
+                    error:   'Too many email links were sent. Please wait before trying again.'
+                };
+            }
+            if (code === 'EMAIL_EXISTS' || response.status === 409) {
+                return {
+                    success: false,
+                    code:    'EMAIL_EXISTS',
+                    error:   `${email} already has a CareHub account.`
+                };
+            }
+            if (response.status === 403) {
+                return {
+                    success: false,
+                    code:    'FORBIDDEN',
+                    error:   'Your role does not have permission to invite this user type.'
+                };
+            }
+
+            return { success: false, code, error: msg };
+        }
+
+        return { success: true, user_id: result.user_id };
+    }
+
+    /**
+     * Placeholder path — inserts a row into pending_invites (NOT profiles).
+     *
+     * Rationale: profiles requires a real auth.users id and is protected by RLS.
+     * pending_invites is a staging table with its own RLS that allows admin/co_owner
+     * to insert without a real auth account existing yet.
+     *
+     * Duplicate check order:
+     *   1. profiles.email  — already has a real account
+     *   2. pending_invites.email — already queued
+     *
+     * No email is sent. Safe to run before the Edge Function is deployed.
+     * @private
+     */
+    async function _invitePlaceholder(db, { email, role, full_name, caregiver_id, client_id }) {
+        _debugLog('inviteUser — PLACEHOLDER mode (EDGE_FUNCTION_DEPLOYED = false)', { email, role, full_name });
+
+        // ── 1. Check profiles for existing real account ───────────────────────
+        const { data: existingProfile } = await db
+            .from('profiles')
+            .select('id')
+            .eq('email', email)
+            .maybeSingle();
+
+        if (existingProfile) {
+            return {
+                success: false,
+                code:    'EMAIL_EXISTS',
+                error:   `${email} already has a CareHub account.`
+            };
+        }
+
+        // ── 2. Check pending_invites for an existing queued invite ─────────────
+        const { data: existingInvite } = await db
+            .from('pending_invites')
+            .select('id, status')
+            .eq('email', email)
+            .maybeSingle();
+
+        if (existingInvite) {
+            return {
+                success: false,
+                code:    'EMAIL_EXISTS',
+                error:   `An invite for ${email} is already queued (status: ${existingInvite.status}).`
+            };
+        }
+
+        // ── 3. Get current user id to record invited_by ───────────────────────
+        let invitedBy = null;
+        try {
+            const { data: { session } } = await db.auth.getSession();
+            invitedBy = session?.user?.id || null;
+        } catch (_) { /* non-fatal */ }
+
+        // ── 4. Insert into pending_invites ────────────────────────────────────
+        const { error: insertError } = await db
+            .from('pending_invites')
+            .insert({
+                email,
+                full_name:    full_name || email,
+                role,
+                caregiver_id: caregiver_id || null,
+                client_id:    client_id    || null,
+                invited_by:   invitedBy,
+                status:       'pending'
+            });
+
+        if (insertError) {
+            // 23505 = unique_violation — race condition, already inserted
+            if (insertError.code === '23505') {
+                return {
+                    success: false,
+                    code:    'EMAIL_EXISTS',
+                    error:   `An invite for ${email} was already queued.`
+                };
+            }
+            _debugLog('pending_invites insert error:', insertError.message, insertError.code);
+            return {
+                success: false,
+                code:    'INSERT_FAILED',
+                error:   'Failed to queue the invite. ' + insertError.message
+            };
+        }
 
         return {
             success: false,
             pending: true,
-            message: `Invite queued for ${email}. Deploy the invite-user Edge Function to send the email.`
+            code:    'EDGE_NOT_DEPLOYED',
+            message: `Invite queued for ${email}. ` +
+                     `Deploy the invite-user Edge Function and set EDGE_FUNCTION_DEPLOYED = true to send the real email.`
         };
     }
 

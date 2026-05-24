@@ -1650,8 +1650,9 @@ async function loadCaregivers(filter = 'all') {
         caregivers = window.RoleFilter.filterRecordsByRole(caregivers, 'caregivers', ctx);
     }
     
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
     const container = document.getElementById('caregiversContent');
-    
+
     if (caregivers.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
@@ -1688,6 +1689,10 @@ async function loadCaregivers(filter = 'all') {
                                 <button class="btn btn-sm btn-secondary" onclick="viewCaregiver('${cg.id}')">
                                     View
                                 </button>
+                                ${(role === 'admin_owner' || role === 'co_owner') && cg.account_status !== 'active' ? `
+                                <button class="btn btn-sm btn-invite" data-invite-id="${cg.id}" onclick="sendCaregiverInvite('${cg.id}')" title="${cg.account_status === 'invite_sent' ? 'Resend portal invite' : 'Send portal invite'}">
+                                    <i class="ph ph-envelope"></i> ${cg.account_status === 'invite_sent' ? 'Resend' : 'Invite'}
+                                </button>` : ''}
                             </td>
                         </tr>
                     `).join('')}
@@ -2094,23 +2099,26 @@ async function loadVisitUpdates(filter = 'all') {
 }
 
 function renderSettings() {
+    const session  = typeof getSession      === 'function' ? getSession()      : null;
+    const role     = typeof getCurrentRole  === 'function' ? getCurrentRole()  : null;
+    const canInvite = role === 'admin_owner' || role === 'co_owner';
+
+    const roleDisplayMap = {
+        admin_owner:   'Admin / Owner',
+        co_owner:      'Co-Owner',
+        caregiver:     'Caregiver',
+        client_family: 'Client / Family'
+    };
+    const roleDisplay = roleDisplayMap[role] || 'User';
+    const userEmail   = session?.email || (typeof ADMIN_CREDENTIALS !== 'undefined' ? ADMIN_CREDENTIALS.email : '');
+    const userName    = session?.name  || userEmail;
+
     mainContent.innerHTML = `
         <div class="page-header animate-fade-in">
             <h1>Settings</h1>
-            <p>Configure your CareHub preferences</p>
+            <p>Configure your CareHub account and team</p>
         </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <span class="card-title">General Settings</span>
-            </div>
-            <div class="card-body">
-                <p style="color: var(--warm-muted);">
-                    Settings functionality will be expanded in future phases.
-                </p>
-            </div>
-        </div>
-        
+
         <div class="card">
             <div class="card-header">
                 <span class="card-title">Account Information</span>
@@ -2118,17 +2126,42 @@ function renderSettings() {
             <div class="card-body">
                 <div class="detail-grid">
                     <div class="detail-item">
+                        <div class="detail-label">Name</div>
+                        <div class="detail-value">${escapeHtml(userName)}</div>
+                    </div>
+                    <div class="detail-item">
                         <div class="detail-label">Email</div>
-                        <div class="detail-value">${escapeHtml(ADMIN_CREDENTIALS.email)}</div>
+                        <div class="detail-value">${escapeHtml(userEmail)}</div>
                     </div>
                     <div class="detail-item">
                         <div class="detail-label">Role</div>
-                        <div class="detail-value">Administrator</div>
+                        <div class="detail-value">${escapeHtml(roleDisplay)}</div>
                     </div>
                 </div>
             </div>
         </div>
+
+        ${canInvite ? '<div id="inviteUserSection"></div>' : ''}
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">General Settings</span>
+            </div>
+            <div class="card-body">
+                <p style="color: var(--warm-muted);">
+                    Additional settings will be available in future phases.
+                </p>
+            </div>
+        </div>
     `;
+
+    // Mount invite section for admin roles
+    if (canInvite && window.CareHubInvite) {
+        const inviteContainer = document.getElementById('inviteUserSection');
+        if (inviteContainer) {
+            window.CareHubInvite.renderInviteSection(inviteContainer);
+        }
+    }
 }
 
 // Schedule View State
@@ -2953,11 +2986,31 @@ async function viewCaregiver(id) {
     
     modalTitle.textContent = 'Caregiver Profile';
     modalBody.innerHTML = renderCaregiverDetails(caregiver);
+
+    const acctStatus = caregiver.account_status || 'approved_no_invite';
+    const canSendInvite   = ['approved_no_invite', 'pending_invite'].includes(acctStatus);
+    const canResendInvite = acctStatus === 'invite_sent';
+    const isActive        = acctStatus === 'active';
+    const modalRole = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
+    const isAdmin = modalRole === 'admin_owner' || modalRole === 'co_owner';
+
     modalFooter.innerHTML = `
         <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+        ${isAdmin && isActive ? `
+            <button class="btn btn-secondary" disabled title="This caregiver already has an active portal account" style="cursor:default;opacity:0.7;">
+                <i class="ph ph-check-circle"></i> Account Active
+            </button>` : ''}
+        ${isAdmin && canSendInvite ? `
+            <button class="btn btn-invite" id="modalInviteBtn" onclick="sendCaregiverInvite('${id}')">
+                <i class="ph ph-envelope"></i> Send Portal Invite
+            </button>` : ''}
+        ${isAdmin && canResendInvite ? `
+            <button class="btn btn-invite" id="modalInviteBtn" onclick="sendCaregiverInvite('${id}')">
+                <i class="ph ph-envelope"></i> Resend Invite
+            </button>` : ''}
         <button class="btn btn-primary" onclick="openCaregiverEditModal('${id}')">Edit Profile</button>
     `;
-    
+
     openModal();
 }
 
@@ -3067,47 +3120,226 @@ function renderScheduleDetails(schedule) {
 // ==================== APPROVAL/DENY ACTIONS ====================
 
 async function approveApplication(id) {
-    const confirmed = await CareHubConfirm.confirm({
-        title: 'Approve Application',
-        message: 'Are you sure you want to approve this application? This will create a new caregiver profile.',
+    // ── Step 1: Confirm profile creation ─────────────────────────────────────
+    const confirmApprove = await CareHubConfirm.confirm({
+        title:       'Approve Application',
+        message:     'Approve this applicant and create their caregiver profile?',
         confirmText: 'Approve',
-        cancelText: 'Cancel',
-        icon: 'ph-check-circle',
-        iconColor: '#10B981'
+        cancelText:  'Cancel',
+        icon:        'ph-check-circle',
+        iconColor:   '#10B981'
     });
-    if (!confirmed) return;
-    
-    const success = await updateApplicationStatus(id, 'approved');
-    if (!success) {
-        CareHubToast.error('Failed to approve application');
+    if (!confirmApprove) return;
+
+    // Mark application approved
+    const appUpdated = await updateApplicationStatus(id, 'approved');
+    if (!appUpdated) {
+        CareHubToast.error('Failed to update application status.');
         return;
     }
-    
-    // Create caregiver from application
-    const caregiver = await createCaregiverFromApplication(currentData);
-    if (caregiver) {
-        CareHubToast.success(`Application approved! Caregiver "${caregiver.name}" has been created.`);
 
-        // Invite caregiver to create their CareHub account
-        if (window.SupabaseAuth && caregiver.email) {
-            const invite = await window.SupabaseAuth.inviteUser({
-                email:        caregiver.email,
-                role:         'caregiver',
-                full_name:    caregiver.name,
-                caregiver_id: caregiver.id
-            });
-            if (invite.pending) {
-                CareHubToast.warning('Account invite queued — deploy the invite-user Edge Function to send the email.');
-            } else if (invite.success) {
-                CareHubToast.info(`Invite email sent to ${caregiver.email}.`);
-            }
+    // Create caregiver profile (account_status starts as 'approved_no_invite')
+    const caregiver = await createCaregiverFromApplication(currentData);
+    if (!caregiver) {
+        CareHubToast.error('Application approved but caregiver profile could not be created. Check the console for details.');
+        closeModal();
+        loadPage('applications');
+        return;
+    }
+
+    // ── Step 2: Ask whether to send the portal invite now ────────────────────
+    const sendNow = await CareHubConfirm.confirm({
+        title:       'Send Portal Invite?',
+        message:     `Caregiver profile created for ${caregiver.name}.\n\nSend a portal invite to ${caregiver.email} now so they can set up their account?`,
+        confirmText: 'Send Invite Now',
+        cancelText:  'Save for Later',
+        icon:        'ph-envelope',
+        iconColor:   '#6366F1'
+    });
+
+    if (!sendNow) {
+        // Admin chose to send later — profile stays at 'approved_no_invite'
+        CareHubToast.success(`Caregiver profile created for ${caregiver.name}. You can send the invite later from their profile.`);
+        closeModal();
+        loadPage('applications');
+        return;
+    }
+
+    // ── Step 3: Send or queue invite ─────────────────────────────────────────
+    if (!window.SupabaseAuth) {
+        CareHubToast.warning('Auth system not available. Invite could not be sent.');
+        closeModal();
+        loadPage('applications');
+        return;
+    }
+
+    const edgeDeployed = !!(window.CAREHUB_CONFIG && window.CAREHUB_CONFIG.EDGE_FUNCTION_DEPLOYED);
+
+    const invite = await window.SupabaseAuth.inviteUser({
+        email:        caregiver.email,
+        role:         'caregiver',
+        full_name:    caregiver.name,
+        caregiver_id: caregiver.id
+    });
+
+    if (edgeDeployed) {
+        // ── Live invite path ──────────────────────────────────────────────────
+        if (invite.success) {
+            await updateCaregiverAccountStatus(caregiver.id, 'invite_sent');
+            CareHubToast.success(`Caregiver profile created and portal invite sent to ${caregiver.email}.`);
+        } else if (invite.code === 'RATE_LIMIT') {
+            CareHubToast.warning('Too many email links were sent. Please wait before retrying the invite.');
+        } else if (invite.code === 'EMAIL_EXISTS') {
+            await updateCaregiverAccountStatus(caregiver.id, 'invite_sent');
+            CareHubToast.info(`${caregiver.email} already has a CareHub account. Profile linked.`);
+        } else {
+            CareHubToast.error(`Caregiver profile created, but invite failed: ${invite.error || 'Unknown error.'}`);
         }
     } else {
-        CareHubToast.warning('Application approved, but failed to create caregiver profile.');
+        // ── Placeholder path (Edge Function not deployed) ─────────────────────
+        if (invite.pending) {
+            await updateCaregiverAccountStatus(caregiver.id, 'pending_invite');
+            CareHubToast.warning(`Caregiver profile created. Invite queued for ${caregiver.email} — email will not be sent until the Edge Function is deployed.`);
+        } else if (invite.code === 'EMAIL_EXISTS') {
+            CareHubToast.info(`${caregiver.email} already has a pending invite or account.`);
+        } else {
+            CareHubToast.error(`Caregiver profile created, but invite queue failed: ${invite.error || 'Unknown error.'}`);
+        }
     }
-    
+
     closeModal();
     loadPage('applications');
+}
+
+/**
+ * Send or resend a portal invite to a caregiver.
+ * Can be called from the caregiver table row OR from the detail modal.
+ * Fetches fresh caregiver data itself — does NOT rely on currentData.
+ * @param {string} caregiverId
+ */
+async function sendCaregiverInvite(caregiverId) {
+    // ── Double-click / in-flight guard ───────────────────────────────────────
+    if (sendCaregiverInvite._pending) return;
+
+    // ── Fetch fresh caregiver data (never trust stale currentData) ────────────
+    const cg = await getCaregiverById(caregiverId);
+    if (!cg) {
+        CareHubToast.error('Caregiver not found.');
+        return;
+    }
+
+    if (window.DEBUG === true) console.log('[CareHub] sendCaregiverInvite:', cg.name, '| account_status:', cg.account_status);
+
+    // ── Already has active account ────────────────────────────────────────────
+    if (cg.account_status === 'active') {
+        CareHubToast.info(`${cg.name} already has an active portal account.`);
+        return;
+    }
+
+    // ── Email guard ───────────────────────────────────────────────────────────
+    if (!cg.email || !cg.email.trim()) {
+        CareHubToast.error(`Cannot send invite — ${cg.name} has no email address on file.`);
+        return;
+    }
+
+    // ── Auth system guard ─────────────────────────────────────────────────────
+    if (!window.SupabaseAuth) {
+        CareHubToast.warning('Auth system not available. Reload the page and try again.');
+        return;
+    }
+
+    const isResend = cg.account_status === 'invite_sent';
+    const confirmed = await CareHubConfirm.confirm({
+        title:       isResend ? 'Resend Portal Invite?' : 'Send Portal Invite?',
+        message:     `${isResend ? 'Resend' : 'Send'} a portal invite to ${cg.email} so they can set up their CareHub account?`,
+        confirmText: isResend ? 'Resend Invite' : 'Send Invite',
+        cancelText:  'Cancel',
+        icon:        'ph-envelope',
+        iconColor:   '#6366F1'
+    });
+    if (!confirmed) return;
+
+    // ── Loading state — lock all invite buttons for this caregiver ────────────
+    sendCaregiverInvite._pending = true;
+    const allBtns = document.querySelectorAll(`[data-invite-id="${caregiverId}"], #modalInviteBtn`);
+    const savedLabels = [];
+    allBtns.forEach((btn, i) => {
+        savedLabels[i] = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ph ph-circle-notch" style="animation:spin .8s linear infinite"></i> Sending…';
+    });
+
+    const restoreBtns = () => {
+        allBtns.forEach((btn, i) => {
+            btn.disabled = false;
+            btn.innerHTML = savedLabels[i];
+        });
+        sendCaregiverInvite._pending = false;
+    };
+
+    const edgeDeployed = !!(window.CAREHUB_CONFIG && window.CAREHUB_CONFIG.EDGE_FUNCTION_DEPLOYED);
+
+    if (window.DEBUG === true) console.log('[CareHub] inviteUser payload:', { email: cg.email, role: 'caregiver', caregiver_id: cg.id, edgeDeployed });
+
+    let invite;
+    try {
+        invite = await window.SupabaseAuth.inviteUser({
+            email:        cg.email,
+            role:         'caregiver',
+            full_name:    cg.name,
+            caregiver_id: cg.id
+        });
+    } catch (err) {
+        if (window.DEBUG === true) console.error('[CareHub] sendCaregiverInvite unexpected error:', err);
+        CareHubToast.error('An unexpected error occurred. Please try again.');
+        restoreBtns();
+        return;
+    }
+
+    if (window.DEBUG === true) console.log('[CareHub] inviteUser result:', invite);
+
+    if (edgeDeployed) {
+        if (invite.success) {
+            await updateCaregiverAccountStatus(cg.id, 'invite_sent');
+            CareHubToast.success(`Portal invite sent to ${cg.email}.`);
+        } else if (invite.code === 'RATE_LIMIT') {
+            CareHubToast.warning('Too many email links were sent. Please wait before retrying.');
+            restoreBtns();
+            return;
+        } else if (invite.code === 'EMAIL_EXISTS') {
+            await updateCaregiverAccountStatus(cg.id, 'invite_sent');
+            CareHubToast.info(`${cg.email} already has a CareHub account. Status updated.`);
+        } else {
+            CareHubToast.error(`Invite failed: ${invite.error || 'Unknown error.'}`);
+            restoreBtns();
+            return;
+        }
+    } else {
+        if (invite.pending) {
+            await updateCaregiverAccountStatus(cg.id, 'pending_invite');
+            CareHubToast.warning(`Invite queued for ${cg.email}. No email will be sent until the Edge Function is deployed.`);
+        } else if (invite.code === 'EMAIL_EXISTS') {
+            CareHubToast.info(`An invite for ${cg.email} is already queued.`);
+        } else if (invite.code === 'INSERT_FAILED') {
+            CareHubToast.error(`Invite queue failed — pending_invites table may not exist yet. Run the migration SQL.`);
+            restoreBtns();
+            return;
+        } else {
+            CareHubToast.error(`Invite queue failed: ${invite.error || 'Unknown error.'}`);
+            restoreBtns();
+            return;
+        }
+    }
+
+    sendCaregiverInvite._pending = false;
+
+    // ── Refresh: modal (if open) + caregiver list ─────────────────────────────
+    if (currentData && currentData.id === caregiverId) {
+        await viewCaregiver(caregiverId);
+    }
+    if (document.getElementById('caregiversContent')) {
+        await loadCaregivers('all');
+    }
 }
 
 async function denyApplication(id) {
@@ -3612,6 +3844,21 @@ function renderCaregiverDetails(cg) {
                     <div class="detail-label">Welcome Package</div>
                     <div class="detail-value">${renderStatusBadge(cg.welcome_package_status || 'not_sent')}</div>
                 </div>
+            </div>
+        </div>
+
+        <div class="detail-section">
+            <h4>Portal Account</h4>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <div class="detail-label">Account Status</div>
+                    <div class="detail-value">${renderStatusBadge(cg.account_status || 'approved_no_invite')}</div>
+                </div>
+                ${cg.account_status === 'active' ? `
+                <div class="detail-item">
+                    <div class="detail-label">Portal Access</div>
+                    <div class="detail-value" style="color:var(--success,#16a34a);font-weight:600;">Active</div>
+                </div>` : ''}
             </div>
         </div>
 
@@ -5312,6 +5559,7 @@ window.viewCareRequest = viewCareRequest;
 window.viewCaregiver = viewCaregiver;
 window.viewClient = viewClient;
 window.approveApplication = approveApplication;
+window.sendCaregiverInvite = sendCaregiverInvite;
 window.denyApplication = denyApplication;
 window.denyCareRequest = denyCareRequest;
 window.addCareRequestAdminNotes = addCareRequestAdminNotes;

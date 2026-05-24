@@ -459,6 +459,7 @@ async function createCaregiverFromApplication(application) {
         why_work_with_seniors: application.why_work_with_seniors || '',
         application_id: application.id,
         status: 'onboarding',
+        account_status: 'approved_no_invite',
         pay_rate: 17,
         background_check_status: 'pending',
         training_status: 'pending',
@@ -526,6 +527,7 @@ async function updateCaregiver(id, updates) {
     // Whitelist only columns that exist in caregivers table
     const allowedColumns = [
         'status',
+        'account_status',
         'pay_rate',
         'background_check_status',
         'training_status',
@@ -558,6 +560,36 @@ async function updateCaregiver(id, updates) {
     }
 
     if (window.DEBUG) console.log('[CareHub] Caregiver updated successfully');
+    return true;
+}
+
+/**
+ * Update the portal account_status for a caregiver.
+ * Valid values: 'approved_no_invite' | 'pending_invite' | 'invite_sent' | 'active' | 'inactive'
+ * @param {string} id
+ * @param {string} accountStatus
+ * @returns {Promise<boolean>}
+ */
+async function updateCaregiverAccountStatus(id, accountStatus) {
+    if (!supabaseClient) return false;
+
+    const VALID = ['approved_no_invite', 'pending_invite', 'invite_sent', 'active', 'inactive'];
+    if (!VALID.includes(accountStatus)) {
+        console.error('[CareHub] updateCaregiverAccountStatus: invalid status:', accountStatus);
+        return false;
+    }
+
+    if (window.DEBUG) console.log('[CareHub] updateCaregiverAccountStatus', id, '->', accountStatus);
+
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVERS)
+        .update({ account_status: accountStatus, updated_at: new Date().toISOString() })
+        .eq('id', id);
+
+    if (error) {
+        console.error('[CareHub] ERROR updating caregiver account_status:', error.message);
+        return false;
+    }
     return true;
 }
 
