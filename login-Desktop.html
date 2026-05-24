@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - SeniorSitters CareHub</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+</head>
+<body class="login-page">
+    <div class="login-container">
+        <div class="login-logo">
+            <h1>👴👵 SeniorSitters</h1>
+            <p>CareHub Admin Portal</p>
+        </div>
+        
+        <form class="login-form" id="loginForm">
+            <div class="error-message" id="errorMessage"></div>
+            
+            <div class="form-group">
+                <label for="email">Email Address</label>
+                <input 
+                    type="email" 
+                    id="email" 
+                    name="email" 
+                    placeholder="admin@ruknanalytics.com"
+                    required
+                    autocomplete="email"
+                >
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input 
+                    type="password" 
+                    id="password" 
+                    name="password" 
+                    placeholder="demo123"
+                    required
+                    autocomplete="current-password"
+                >
+            </div>
+            
+            <button type="submit" class="btn btn-primary" id="loginBtn">
+                Sign In
+            </button>
+        </form>
+        
+        <!-- Demo Login Buttons - For Testing Role-Based Views -->
+        <div class="demo-login-section">
+            <div class="demo-divider">
+                <span>Quick Demo Login</span>
+            </div>
+            <div class="demo-buttons">
+                <button class="demo-btn demo-admin" onclick="demoLogin('admin@ruknanalytics.com')">
+                    <i class="ph ph-crown"></i>
+                    <span>Admin/Owner</span>
+                </button>
+                <button class="demo-btn demo-coowner" onclick="demoLogin('owner@seniorsittersco.com')">
+                    <i class="ph ph-user-gear"></i>
+                    <span>Co-Owner</span>
+                </button>
+                <button class="demo-btn demo-caregiver" onclick="demoLogin('caregiver@seniorsittersco.com')">
+                    <i class="ph ph-stethoscope"></i>
+                    <span>Caregiver</span>
+                </button>
+                <button class="demo-btn demo-family" onclick="demoLogin('family@seniorsittersco.com')">
+                    <i class="ph ph-users"></i>
+                    <span>Client/Family</span>
+                </button>
+            </div>
+            <p class="demo-note">All passwords: <code>demo123</code></p>
+        </div>
+    </div>
+
+    <script src="js/config.js"></script>
+    <script src="js/auth.js"></script>
+    <script>
+        // Check if already logged in
+        if (isAuthenticated()) {
+            window.location.href = 'index.html';
+        }
+
+        // Demo login helper - fills fields and logs in directly
+        function demoLogin(email) {
+            document.getElementById('email').value = email;
+            document.getElementById('password').value = 'demo123';
+            
+            // Trigger form submission
+            document.getElementById('loginForm').dispatchEvent(new Event('submit'));
+        }
+
+        // Handle login form
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value;
+            const errorMsg = document.getElementById('errorMessage');
+            const loginBtn = document.getElementById('loginBtn');
+            
+            // Clear previous errors
+            errorMsg.textContent = '';
+            errorMsg.classList.remove('show');
+            
+            // Show loading
+            loginBtn.disabled = true;
+            loginBtn.textContent = 'Signing in...';
+            
+            // Attempt login
+            setTimeout(() => {
+                const result = login(email, password);
+                
+                if (result.success) {
+                    window.location.href = 'index.html';
+                } else {
+                    errorMsg.textContent = result.error;
+                    errorMsg.classList.add('show');
+                    loginBtn.disabled = false;
+                    loginBtn.textContent = 'Sign In';
+                }
+            }, 500); // Small delay for UX
+        });
+    </script>
+</body>
+</html>

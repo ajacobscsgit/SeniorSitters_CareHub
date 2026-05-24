@@ -1,6 +1,15 @@
 // SeniorSitters CareHub - Configuration
 // ======================================
 
+// Set to true to enable verbose console logging during development.
+// Set to false (or remove) before going to production.
+window.DEBUG = false;
+
+// DEV_MODE = true  → demo/mock login buttons are visible; DEMO_USERS are accepted.
+// DEV_MODE = false → only real Supabase Auth is accepted; demo buttons are hidden.
+// IMPORTANT: Set to false before deploying to production.
+window.DEV_MODE = true;
+
 window.CAREHUB_CONFIG = {
   SUPABASE_URL: "https://zyoozdgdiwopgwstiugu.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp5b296ZGdkaXdvcGd3c3RpdWd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMzAyNDMsImV4cCI6MjA5MzYwNjI0M30.T32uwCGaZo1YkqzIaRN_7eyjzPshXdmcHPFDdM7MH7w"
@@ -29,25 +38,36 @@ window.DEMO_USERS = {
   'admin@ruknanalytics.com': {
     password: 'demo123',
     role: 'admin_owner',
-    name: 'Admin User'
+    name: 'Admin User',
+    caregiver_id: null,
+    client_id: null
   },
   // Co-Owner - Almost full access (except sensitive ownership settings)
   'owner@seniorsittersco.com': {
     password: 'demo123',
     role: 'co_owner',
-    name: 'Co-Owner User'
+    name: 'Co-Owner User',
+    caregiver_id: null,
+    client_id: null
   },
   // Caregiver - Own schedule, timesheets, visit updates, assigned clients
+  // caregiver_id must match the `id` column in the caregivers table for real data.
+  // Set to null here; auth.js will look up the real id after Supabase auth is wired in.
   'caregiver@seniorsittersco.com': {
     password: 'demo123',
     role: 'caregiver',
-    name: 'Jane Caregiver'
+    name: 'Jane Caregiver',
+    caregiver_id: null,   // TODO: replace with real caregiver row id from DB
+    client_id: null
   },
   // Client/Family - Loved one's schedule, approved updates, family notes
+  // client_id must match the `id` column in the clients table for real data.
   'family@seniorsittersco.com': {
     password: 'demo123',
     role: 'client_family',
-    name: 'Family Member'
+    name: 'Family Member',
+    caregiver_id: null,
+    client_id: null       // TODO: replace with real client row id from DB
   }
 };
 

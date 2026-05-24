@@ -19,12 +19,28 @@ const modalFooter = document.getElementById('modalFooter');
 // Initialize App - only after auth is verified
 // Note: Auth check happens in index.html, this runs after
 function initApp() {
+    // Guard: Check if auth system is initialized
+    if (typeof isAuthenticated !== 'function') {
+        console.error('[Init] Auth system not initialized. Cannot start app.');
+        return;
+    }
+    
     if (!isAuthenticated()) {
         // Auth check failed, don't initialize
         return;
     }
     
     if (DEBUG) console.log('[CareHub] Initializing integrated operating system...');
+
+    // Resolve real DB IDs (caregiver_id / client_id) for non-admin users.
+    // Fire-and-forget: runs async in background; dashboard data fetch starts
+    // immediately. If resolution completes before the first Supabase query
+    // the filtered IDs will be used; otherwise the next navigation will pick them up.
+    if (typeof resolveUserIds === 'function') {
+        resolveUserIds().catch(e => {
+            if (DEBUG) console.warn('[Init] resolveUserIds failed silently:', e);
+        });
+    }
     
     // Initialize navigation and UI
     initNavigation();
@@ -32,9 +48,13 @@ function initApp() {
     initModal();
     initMobileMenu();
     
-    // Update sidebar based on user role
-    updateSidebarNavigation();
-    updateUserInfo();
+    // Update sidebar based on user role (only if auth functions are ready)
+    if (typeof getCurrentRole === 'function') {
+        updateSidebarNavigation();
+        updateUserInfo();
+    } else {
+        console.warn('[Init] Role functions not available, skipping role-based UI');
+    }
     
     // Initialize state management subscriptions
     initStateSubscriptions();
@@ -107,10 +127,12 @@ function initNavigation() {
             const page = item.dataset.page;
             
             // Role-based route guard
-            if (!canAccessPage(page)) {
-                if (DEBUG) console.log(`[Navigation] Access denied to ${page} for role ${getCurrentRole()}`);
-                showAlert('You do not have permission to access this page', 'error');
-                return;
+            if (typeof canAccessPage === 'function') {
+                if (!canAccessPage(page)) {
+                    if (DEBUG) console.log(`[Navigation] Access denied to ${page} for role ${getCurrentRole ? getCurrentRole() : 'unknown'}`);
+                    showAlert('You do not have permission to access this page', 'error');
+                    return;
+                }
             }
             
             loadPage(page);
@@ -130,6 +152,12 @@ function initNavigation() {
  * Shows/hides nav items according to role permissions
  */
 function updateSidebarNavigation() {
+    // Guard: Check if auth system is initialized
+    if (typeof getCurrentRole !== 'function' || typeof getAllowedPages !== 'function') {
+        console.warn('[Navigation] Auth system not initialized yet');
+        return;
+    }
+    
     const role = getCurrentRole();
     if (!role) return;
     
@@ -153,6 +181,12 @@ function updateSidebarNavigation() {
  * Update user info display in sidebar
  */
 function updateUserInfo() {
+    // Guard: Check if auth system is initialized
+    if (typeof getSession !== 'function') {
+        console.warn('[UserInfo] Auth system not initialized yet');
+        return;
+    }
+    
     const session = getSession();
     if (!session) return;
     
@@ -170,15 +204,46 @@ function updateUserInfo() {
 }
 
 function initLogout() {
-    document.getElementById('logoutBtn').addEventListener('click', logout);
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (!logoutBtn) return;
+    
+    logoutBtn.addEventListener('click', () => {
+        if (typeof logout === 'function') {
+            logout();
+        } else {
+            console.error('[Logout] Auth system not initialized');
+        }
+    });
 }
 
 function initMobileMenu() {
-    const toggle = document.getElementById('mobileMenuToggle');
+    const toggle  = document.getElementById('mobileMenuToggle');
     const sidebar = document.getElementById('sidebar');
-    
+    const overlay = document.getElementById('sidebarOverlay');
+
+    function openSidebar() {
+        sidebar.classList.add('open');
+        if (overlay) overlay.style.display = 'block';
+    }
+
+    function closeSidebar() {
+        sidebar.classList.remove('open');
+        if (overlay) overlay.style.display = 'none';
+    }
+
     toggle.addEventListener('click', () => {
-        sidebar.classList.toggle('open');
+        sidebar.classList.contains('open') ? closeSidebar() : openSidebar();
+    });
+
+    if (overlay) {
+        overlay.addEventListener('click', closeSidebar);
+    }
+
+    // Close sidebar on nav item click (mobile)
+    sidebar.querySelectorAll('.nav-item').forEach(item => {
+        item.addEventListener('click', () => {
+            if (window.innerWidth <= 768) closeSidebar();
+        });
     });
 }
 
@@ -571,7 +636,7 @@ function renderCalendarDayHeaders(compact = false) {
  * @param {string} dateStr - YYYY-MM-DD
  */
 function navigateToDateFromCalendar(dateStr) {
-    scheduleCurrentDate = parseLocalDate(dateStr);
+    scheduleCurrentDate = parseLocalDateToDate(dateStr);
     
     // Reset mini calendar offset
     const miniCal = document.getElementById('miniCalendar');
@@ -592,7 +657,7 @@ async function renderDashboard() {
     const dateStr = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
     
     // Get role-based visibility settings
-    const role = getCurrentRole();
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
     const visibility = role ? (window.DASHBOARD_VISIBILITY[role] || {}) : window.DASHBOARD_VISIBILITY[window.ROLES.ADMIN_OWNER];
     
     const {
@@ -736,14 +801,31 @@ async function renderDashboard() {
         </div>
     `;
 
+    // For restricted roles, also fetch their personal timesheets and visit updates
+    // so scopeDashboardStats can produce accurate personal KPI counts.
+    const isFullAccess = window.RoleFilter ? window.RoleFilter._isFullAccess() : true;
+    const roleFilterQueries = isFullAccess ? [] : [
+        getTimesheets(window.RoleFilter.buildQueryFilters('timesheets')),
+        getVisitUpdates(window.RoleFilter.buildQueryFilters('visit_updates'))
+    ];
+
+    // Only fetch onboarding caregivers for admin/owner roles (admin-only widget)
+    const shouldFetchOnboarding = isFullAccess || showOnboarding;
+
     // Load all dashboard data in parallel
-    const [stats, todaysSchedule, activities, alerts, onboarding] = await Promise.all([
+    const [rawStats, todaysSchedule, activities, alerts, onboarding, personalTimesheets, personalUpdates] = await Promise.all([
         getDashboardStats(),
         getTodaysSchedule(),
         getRecentActivity(10),
         getDashboardAlerts(),
-        getOnboardingCaregivers()
+        shouldFetchOnboarding ? getOnboardingCaregivers() : Promise.resolve([]),
+        ...(isFullAccess ? [Promise.resolve([]), Promise.resolve([])] : roleFilterQueries)
     ]);
+
+    // Scope stats to current role (admins get full counts; others get personal counts)
+    const stats = window.RoleFilter
+        ? window.RoleFilter.scopeDashboardStats(rawStats, todaysSchedule, personalTimesheets, personalUpdates)
+        : rawStats;
 
     // Save to shared state for other modules to access
     if (window.CareHubState) {
@@ -889,15 +971,35 @@ function renderKPIsV2(stats) {
     const kpiGrid = document.getElementById('kpiGrid');
     if (!kpiGrid) return;
 
-    const kpis = [
-        { icon: 'ph-user-plus', value: stats.newApplications, label: 'New Applications', color: 'orange', page: 'applications', pulse: stats.newApplications > 0 },
-        { icon: 'ph-handshake', value: stats.pendingCareRequests, label: 'Care Requests', color: 'orange', page: 'care-requests', pulse: stats.pendingCareRequests > 0 },
-        { icon: 'ph-calendar', value: stats.todaysVisits, label: "Today's Visits", color: 'purple', page: 'schedules', pulse: stats.todaysVisits > 0 },
-        { icon: 'ph-clock', value: stats.pendingTimesheets, label: 'Pending Timesheets', color: 'yellow', page: 'timesheets', pulse: stats.pendingTimesheets > 0 },
-        { icon: 'ph-clipboard-text', value: stats.pendingVisitUpdates, label: 'Pending Updates', color: 'yellow', page: 'visit-updates', pulse: stats.pendingVisitUpdates > 0 },
-        { icon: 'ph-stethoscope', value: stats.activeCaregivers, label: 'Active Caregivers', color: 'blue', page: 'caregivers', pulse: false },
-        { icon: 'ph-users', value: stats.activeClients, label: 'Active Clients', color: 'green', page: 'clients', pulse: false }
-    ];
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : 'admin_owner';
+
+    let kpis;
+
+    if (role === 'caregiver') {
+        kpis = [
+            { icon: 'ph-calendar', value: stats.todaysVisits ?? 0, label: "Today's Visits", color: 'purple', page: 'schedules', pulse: (stats.todaysVisits ?? 0) > 0 },
+            { icon: 'ph-clock', value: stats.pendingTimesheets ?? 0, label: 'Pending Timesheets', color: 'yellow', page: 'timesheets', pulse: (stats.pendingTimesheets ?? 0) > 0 },
+            { icon: 'ph-clipboard-text', value: stats.pendingVisitUpdates ?? 0, label: 'Pending Updates', color: 'yellow', page: 'visit-updates', pulse: (stats.pendingVisitUpdates ?? 0) > 0 },
+            { icon: 'ph-check-circle', value: stats.completedVisits ?? 0, label: 'Completed Visits', color: 'green', page: 'schedules', pulse: false }
+        ];
+    } else if (role === 'client_family') {
+        kpis = [
+            { icon: 'ph-calendar', value: stats.todaysVisits ?? 0, label: "Today's Visits", color: 'purple', page: 'schedules', pulse: (stats.todaysVisits ?? 0) > 0 },
+            { icon: 'ph-calendar-blank', value: stats.upcomingVisits ?? 0, label: 'Upcoming Visits', color: 'blue', page: 'schedules', pulse: false },
+            { icon: 'ph-clipboard-check', value: stats.approvedUpdates ?? 0, label: 'Approved Updates', color: 'green', page: 'visit-updates', pulse: false }
+        ];
+    } else {
+        // admin_owner / co_owner — full set
+        kpis = [
+            { icon: 'ph-user-plus', value: stats.newApplications ?? 0, label: 'New Applications', color: 'orange', page: 'applications', pulse: (stats.newApplications ?? 0) > 0 },
+            { icon: 'ph-handshake', value: stats.pendingCareRequests ?? 0, label: 'Care Requests', color: 'orange', page: 'care-requests', pulse: (stats.pendingCareRequests ?? 0) > 0 },
+            { icon: 'ph-calendar', value: stats.todaysVisits ?? 0, label: "Today's Visits", color: 'purple', page: 'schedules', pulse: (stats.todaysVisits ?? 0) > 0 },
+            { icon: 'ph-clock', value: stats.pendingTimesheets ?? 0, label: 'Pending Timesheets', color: 'yellow', page: 'timesheets', pulse: (stats.pendingTimesheets ?? 0) > 0 },
+            { icon: 'ph-clipboard-text', value: stats.pendingVisitUpdates ?? 0, label: 'Pending Updates', color: 'yellow', page: 'visit-updates', pulse: (stats.pendingVisitUpdates ?? 0) > 0 },
+            { icon: 'ph-stethoscope', value: stats.activeCaregivers ?? 0, label: 'Active Caregivers', color: 'blue', page: 'caregivers', pulse: false },
+            { icon: 'ph-users', value: stats.activeClients ?? 0, label: 'Active Clients', color: 'green', page: 'clients', pulse: false }
+        ];
+    }
 
     kpiGrid.innerHTML = kpis.map(k => `
         <div class="cc-kpi cc-kpi-${k.color} ${k.pulse ? 'cc-kpi-pulse' : ''}" onclick="navigateTo('${k.page}')">
@@ -1258,7 +1360,7 @@ async function handleAlertAction(type, link) {
 
 async function navigateToDate(year, month, day) {
     const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    scheduleCurrentDate = parseLocalDate(dateStr);
+    scheduleCurrentDate = new Date(year, month, day);
     
     // Reset mini calendar offset when navigating
     const miniCal = document.getElementById('miniCalendar');
@@ -1289,7 +1391,7 @@ function formatTimeAgo(timestamp) {
 
 function navigateTo(page) {
     // Route guard - check if user can access this page
-    if (!canAccessPage(page)) {
+    if (typeof canAccessPage === 'function' && !canAccessPage(page)) {
         if (DEBUG) console.log(`[Navigation] Access denied to ${page}, redirecting to dashboard`);
         page = 'dashboard'; // Fall back to dashboard
     }
@@ -1532,7 +1634,21 @@ async function renderCaregivers() {
 
 async function loadCaregivers(filter = 'all') {
     const filters = filter !== 'all' ? { status: filter } : {};
-    const caregivers = await getCaregivers(filters);
+    let caregivers = await getCaregivers(filters);
+
+    // Role filtering: caregivers see only themselves; families see their assigned caregivers
+    if (window.RoleFilter && !window.RoleFilter._isFullAccess()) {
+        // Resolve which caregiver IDs are assigned to this user's client (for client_family)
+        let ctx = {};
+        if (window.getCurrentRole && window.getCurrentRole() === 'client_family') {
+            const clientId = window.RoleFilter.getCurrentClientId();
+            if (clientId) {
+                const assignedSchedules = await getSchedules({ client_id: clientId });
+                ctx.assignedCaregiverIds = [...new Set(assignedSchedules.map(s => s.caregiver_id).filter(Boolean))];
+            }
+        }
+        caregivers = window.RoleFilter.filterRecordsByRole(caregivers, 'caregivers', ctx);
+    }
     
     const container = document.getElementById('caregiversContent');
     
@@ -1615,7 +1731,20 @@ async function renderClients() {
 
 async function loadClients(filter = 'all') {
     const filters = filter !== 'all' ? { status: filter } : {};
-    const clients = await getClients(filters);
+    let clients = await getClients(filters);
+
+    // Role filtering: caregivers see only their assigned clients; families see only their own
+    if (window.RoleFilter && !window.RoleFilter._isFullAccess()) {
+        let ctx = {};
+        if (window.getCurrentRole && window.getCurrentRole() === 'caregiver') {
+            const caregiverId = window.RoleFilter.getCurrentCaregiverId();
+            if (caregiverId) {
+                const assignedSchedules = await getSchedules({ caregiver_id: caregiverId });
+                ctx.assignedClientIds = [...new Set(assignedSchedules.map(s => s.client_id).filter(Boolean))];
+            }
+        }
+        clients = window.RoleFilter.filterRecordsByRole(clients, 'clients', ctx);
+    }
     
     const container = document.getElementById('clientsContent');
     
@@ -2004,7 +2133,18 @@ function renderSettings() {
 
 // Schedule View State
 let scheduleViewMode = 'month'; // 'month', 'week', 'day', 'list'
-let scheduleCurrentDate = new Date(); // Currently selected date for navigation
+let scheduleCurrentDate = new Date(); // Currently selected date for navigation — MUST always be a Date object
+
+/**
+ * Guard: ensure scheduleCurrentDate is always a valid Date.
+ * Call at the top of every view renderer and navigation function.
+ */
+function ensureScheduleDateIsDate() {
+    if (!(scheduleCurrentDate instanceof Date) || isNaN(scheduleCurrentDate.getTime())) {
+        scheduleCurrentDate = new Date();
+    }
+}
+
 let scheduleListFilters = {
     dateFrom: '',
     dateTo: '',
@@ -2074,6 +2214,7 @@ async function switchScheduleMode(mode) {
 }
 
 function navigateSchedule(direction) {
+    ensureScheduleDateIsDate();
     const current = new Date(scheduleCurrentDate);
 
     switch(direction) {
@@ -2118,9 +2259,10 @@ function navigateSchedule(direction) {
 
 function getDateRangeDays() {
     // Calculate days in current list view range (default 30)
+    // Use parseLocalDateToDate to avoid timezone-shift when converting YYYY-MM-DD strings
     if (scheduleListFilters.dateFrom && scheduleListFilters.dateTo) {
-        const from = new Date(scheduleListFilters.dateFrom);
-        const to = new Date(scheduleListFilters.dateTo);
+        const from = parseLocalDateToDate(scheduleListFilters.dateFrom);
+        const to = parseLocalDateToDate(scheduleListFilters.dateTo);
         return Math.max(1, Math.round((to - from) / (1000 * 60 * 60 * 24)));
     }
     return 30;
@@ -2148,6 +2290,7 @@ function updateScheduleRangeDisplay() {
     const display = document.getElementById('scheduleRangeDisplay');
     if (!display) return;
 
+    ensureScheduleDateIsDate();
     const current = new Date(scheduleCurrentDate);
     const options = { year: 'numeric', month: 'long' };
 
@@ -2186,6 +2329,8 @@ function updateScheduleRangeDisplay() {
 async function renderMonthView() {
     const container = document.getElementById('schedulesContainer');
     if (!container) return;
+
+    ensureScheduleDateIsDate();
 
     container.innerHTML = `
         <div class="calendar-empty-state">
@@ -2288,6 +2433,8 @@ async function renderMonthView() {
 async function renderWeekView() {
     const container = document.getElementById('schedulesContainer');
     if (!container) return;
+
+    ensureScheduleDateIsDate();
 
     container.innerHTML = `
         <div class="loading-state">
@@ -2397,6 +2544,8 @@ async function renderDayView() {
     const container = document.getElementById('schedulesContainer');
     if (!container) return;
 
+    ensureScheduleDateIsDate();
+
     container.innerHTML = `
         <div class="loading-state">
             <div class="spinner"></div>
@@ -2469,6 +2618,8 @@ async function renderDayView() {
 async function renderListView() {
     const container = document.getElementById('schedulesContainer');
     if (!container) return;
+
+    ensureScheduleDateIsDate();
 
     // Fetch caregivers and clients for filter dropdowns
     const [caregivers, clients] = await Promise.all([
@@ -2717,7 +2868,7 @@ async function openCreateScheduleModalForDate(dateStr) {
 async function viewApplication(id) {
     const application = await getApplicationById(id);
     if (!application) {
-        alert('Application not found');
+        CareHubToast.error('Application not found');
         return;
     }
     
@@ -2745,7 +2896,7 @@ async function viewApplication(id) {
 async function viewCareRequest(id) {
     const request = await getCareRequestById(id);
     if (!request) {
-        alert('Care request not found');
+        CareHubToast.error('Care request not found');
         return;
     }
 
@@ -2794,7 +2945,7 @@ async function viewCareRequest(id) {
 async function viewCaregiver(id) {
     const caregiver = await getCaregiverById(id);
     if (!caregiver) {
-        alert('Caregiver not found');
+        CareHubToast.error('Caregiver not found');
         return;
     }
     
@@ -2813,7 +2964,7 @@ async function viewCaregiver(id) {
 async function viewClient(id) {
     const client = await getClientById(id);
     if (!client) {
-        alert('Client not found');
+        CareHubToast.error('Client not found');
         return;
     }
     
@@ -2832,7 +2983,7 @@ async function viewClient(id) {
 async function viewSchedule(id) {
     const schedule = await getScheduleById(id);
     if (!schedule) {
-        alert('Schedule not found');
+        CareHubToast.error('Schedule not found');
         return;
     }
 
@@ -2916,22 +3067,43 @@ function renderScheduleDetails(schedule) {
 // ==================== APPROVAL/DENY ACTIONS ====================
 
 async function approveApplication(id) {
-    if (!confirm('Are you sure you want to approve this application? This will create a new caregiver profile.')) {
-        return;
-    }
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Approve Application',
+        message: 'Are you sure you want to approve this application? This will create a new caregiver profile.',
+        confirmText: 'Approve',
+        cancelText: 'Cancel',
+        icon: 'ph-check-circle',
+        iconColor: '#10B981'
+    });
+    if (!confirmed) return;
     
     const success = await updateApplicationStatus(id, 'approved');
     if (!success) {
-        alert('Failed to approve application');
+        CareHubToast.error('Failed to approve application');
         return;
     }
     
     // Create caregiver from application
     const caregiver = await createCaregiverFromApplication(currentData);
     if (caregiver) {
-        alert(`Application approved! Caregiver "${caregiver.name}" has been created with status 'onboarding'.`);
+        CareHubToast.success(`Application approved! Caregiver "${caregiver.name}" has been created.`);
+
+        // Invite caregiver to create their CareHub account
+        if (window.SupabaseAuth && caregiver.email) {
+            const invite = await window.SupabaseAuth.inviteUser({
+                email:        caregiver.email,
+                role:         'caregiver',
+                full_name:    caregiver.name,
+                caregiver_id: caregiver.id
+            });
+            if (invite.pending) {
+                CareHubToast.warning('Account invite queued — deploy the invite-user Edge Function to send the email.');
+            } else if (invite.success) {
+                CareHubToast.info(`Invite email sent to ${caregiver.email}.`);
+            }
+        }
     } else {
-        alert('Application approved, but failed to create caregiver profile. Check console for errors.');
+        CareHubToast.warning('Application approved, but failed to create caregiver profile.');
     }
     
     closeModal();
@@ -2939,60 +3111,82 @@ async function approveApplication(id) {
 }
 
 async function denyApplication(id) {
-    const notes = prompt('Optional: Add a note for why this application was denied:');
+    const notes = await CareHubConfirm.prompt({
+        title: 'Deny Application',
+        message: 'Optional: Add a note for why this application was denied:',
+        placeholder: 'Enter denial reason...',
+        required: false,
+        icon: 'ph-x-circle',
+        iconColor: '#EF4444'
+    });
     if (notes === null) return; // User cancelled
     
     const success = await updateApplicationStatus(id, 'denied', notes);
     if (success) {
-        alert('Application has been denied.');
+        CareHubToast.success('Application has been denied.');
         closeModal();
         loadPage('applications');
     } else {
-        alert('Failed to deny application');
+        CareHubToast.error('Failed to deny application');
     }
 }
 
 async function denyCareRequest(id) {
-    const notes = prompt('Add a denial reason for this care request:');
+    const notes = await CareHubConfirm.prompt({
+        title: 'Deny Care Request',
+        message: 'Add a denial reason:',
+        placeholder: 'Enter reason for denial...',
+        required: true,
+        icon: 'ph-warning',
+        iconColor: '#F59E0B'
+    });
     if (notes === null) return;
     if (!notes.trim()) {
-        alert('Denial reason is required.');
+        CareHubToast.error('Denial reason is required.');
         return;
     }
 
     const success = await updateCareRequestStatus(id, 'denied', notes);
     if (success) {
-        alert('Care request has been denied.');
+        CareHubToast.success('Care request has been denied.');
         closeModal();
         loadPage('care-requests');
     } else {
-        alert('Failed to deny care request');
+        CareHubToast.error('Failed to deny care request');
     }
 }
 
 async function addCareRequestAdminNotes(id) {
     const currentNotes = currentData && currentData.admin_notes ? currentData.admin_notes : '';
-    const notes = prompt('Admin notes for this care request:', currentNotes);
+    const notes = await CareHubConfirm.prompt({
+        title: 'Admin Notes',
+        message: 'Add notes for this care request:',
+        placeholder: 'Enter admin notes...',
+        defaultValue: currentNotes,
+        required: false,
+        icon: 'ph-notebook',
+        iconColor: '#6366F1'
+    });
     if (notes === null) return;
 
     const success = await updateCareRequestAdminNotes(id, notes);
     if (success) {
-        alert('Admin notes saved.');
+        CareHubToast.success('Admin notes saved.');
         closeModal();
         loadPage('care-requests');
     } else {
-        alert('Failed to save admin notes');
+        CareHubToast.error('Failed to save admin notes');
     }
 }
 
 async function updateCareRequestStatusUI(id, status) {
     const success = await updateCareRequestStatus(id, status);
     if (success) {
-        alert(`Care request marked as ${status}.`);
+        CareHubToast.success(`Care request marked as ${status}.`);
         closeModal();
         loadPage('care-requests');
     } else {
-        alert('Failed to update care request status');
+        CareHubToast.error('Failed to update care request status');
     }
 }
 
@@ -3002,24 +3196,44 @@ async function convertCareRequestToClient(id) {
     }
 
     if (!currentData) {
-        alert('Care request not found');
+        CareHubToast.error('Care request not found');
         return;
     }
 
     if (currentData.status !== 'approved' && currentData.status !== 'onboarding') {
-        alert('Only approved or onboarding care requests can be converted to clients.');
+        CareHubToast.warning('Only approved or onboarding care requests can be converted to clients.');
         return;
     }
 
-    if (!confirm('Are you sure you want to convert this care request to a client?')) {
-        return;
-    }
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Convert to Client',
+        message: 'Are you sure you want to convert this care request to a client?',
+        confirmText: 'Convert',
+        icon: 'ph-arrow-circle-right'
+    });
+    if (!confirmed) return;
 
     const client = await createClientFromCareRequest(currentData);
     if (client) {
-        alert(`Care request converted! Client "${client.name || client.care_for || client.requester_name || 'New client'}" has been created.`);
+        CareHubToast.success(`Client "${client.name || client.care_for || client.requester_name || 'New client'}" has been created.`);
+
+        // Invite family member to create their CareHub account
+        const familyEmail = currentData.email || currentData.requester_email || null;
+        if (window.SupabaseAuth && familyEmail) {
+            const invite = await window.SupabaseAuth.inviteUser({
+                email:     familyEmail,
+                role:      'client_family',
+                full_name: currentData.requester_name || familyEmail,
+                client_id: client.id
+            });
+            if (invite.pending) {
+                CareHubToast.warning('Account invite queued — deploy the invite-user Edge Function to send the email.');
+            } else if (invite.success) {
+                CareHubToast.info(`Invite email sent to ${familyEmail}.`);
+            }
+        }
     } else {
-        alert('Failed to create client profile. Check console for errors.');
+        CareHubToast.error('Failed to create client profile. Check console for errors.');
         return;
     }
 
@@ -3480,6 +3694,18 @@ function parseLocalDate(dateString) {
     };
 }
 
+/**
+ * Convert a YYYY-MM-DD string to a local Date object without timezone shifting.
+ * Use this everywhere scheduleCurrentDate needs to be set from a string.
+ * @param {string} dateString - YYYY-MM-DD
+ * @returns {Date} Local midnight Date, or today's date if invalid
+ */
+function parseLocalDateToDate(dateString) {
+    const parsed = parseLocalDate(dateString);
+    if (!parsed) return new Date();
+    return new Date(parsed.year, parsed.month - 1, parsed.day);
+}
+
 function formatDate(dateString) {
     if (!dateString) return 'N/A';
     
@@ -3532,7 +3758,7 @@ async function openCaregiverEditModal(id) {
     }
     
     if (!currentData) {
-        alert('Caregiver not found');
+        CareHubToast.error('Caregiver not found');
         return;
     }
     
@@ -3633,13 +3859,13 @@ async function saveCaregiverEdit(id) {
     const success = await updateCaregiver(id, updates);
     
     if (success) {
-        alert('Caregiver profile updated successfully.');
+        CareHubToast.success('Caregiver profile updated successfully.');
         await viewCaregiver(id);
         if (document.getElementById('caregiversContent')) {
             await loadCaregivers('all');
         }
     } else {
-        alert('Failed to update caregiver profile. Check console for errors.');
+        CareHubToast.error('Failed to update caregiver profile. Check console for errors.');
     }
 }
 
@@ -3649,7 +3875,7 @@ async function openClientEditModal(id) {
     }
     
     if (!currentData) {
-        alert('Client not found');
+        CareHubToast.error('Client not found');
         return;
     }
     
@@ -3739,13 +3965,13 @@ async function saveClientEdit(id) {
     const success = await updateClient(id, updates);
     
     if (success) {
-        alert('Client profile updated successfully.');
+        CareHubToast.success('Client profile updated successfully.');
         await viewClient(id);
         if (document.getElementById('clientsContent')) {
             await loadClients('all');
         }
     } else {
-        alert('Failed to update client profile. Check console for errors.');
+        CareHubToast.error('Failed to update client profile. Check console for errors.');
     }
 }
 
@@ -3831,7 +4057,7 @@ async function openEditScheduleModal(id) {
     }
 
     if (!currentData) {
-        alert('Schedule not found');
+        CareHubToast.error('Schedule not found');
         return;
     }
 
@@ -3928,7 +4154,7 @@ async function saveSchedule(id = null) {
 
     // Validation
     if (!scheduleData.date || !scheduleData.start_time || !scheduleData.end_time || !scheduleData.caregiver_id || !scheduleData.client_id) {
-        alert('Please fill in all required fields (Date, Time, Caregiver, Client)');
+        CareHubToast.error('Please fill in all required fields (Date, Time, Caregiver, Client)');
         return;
     }
 
@@ -3937,7 +4163,7 @@ async function saveSchedule(id = null) {
         // Update existing
         success = await updateSchedule(id, scheduleData);
         if (success) {
-            alert('Visit updated successfully.');
+            CareHubToast.success('Visit updated successfully.');
             await viewSchedule(id);
         }
     } else {
@@ -3945,7 +4171,7 @@ async function saveSchedule(id = null) {
         const newSchedule = await createSchedule(scheduleData);
         success = !!newSchedule;
         if (success) {
-            alert('Visit scheduled successfully.');
+            CareHubToast.success('Visit scheduled successfully.');
             closeModal();
         }
     }
@@ -3953,44 +4179,63 @@ async function saveSchedule(id = null) {
     if (success && document.getElementById('schedulesContent')) {
         await loadSchedules('upcoming');
     } else if (!success) {
-        alert('Failed to save schedule. Check console for errors.');
+        CareHubToast.error('Failed to save schedule. Check console for errors.');
     }
 }
 
 async function cancelScheduleUI(id) {
-    const reason = prompt('Enter cancellation reason (optional):');
+    const reason = await CareHubConfirm.prompt({
+        title: 'Cancel Visit',
+        message: 'Enter cancellation reason (optional):',
+        placeholder: 'Enter reason...',
+        required: false,
+        icon: 'ph-calendar-x',
+        iconColor: '#F59E0B'
+    });
     if (reason === null) return; // User cancelled
 
-    if (!confirm('Are you sure you want to cancel this visit?')) {
-        return;
-    }
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Confirm Cancellation',
+        message: 'Are you sure you want to cancel this visit?',
+        confirmText: 'Cancel Visit',
+        cancelText: 'Keep Visit',
+        danger: true,
+        icon: 'ph-warning'
+    });
+    if (!confirmed) return;
 
     const success = await cancelSchedule(id, reason);
     if (success) {
-        alert('Visit cancelled successfully.');
+        CareHubToast.success('Visit cancelled successfully.');
         closeModal();
         if (document.getElementById('schedulesContent')) {
             await loadSchedules('upcoming');
         }
     } else {
-        alert('Failed to cancel visit. Check console for errors.');
+        CareHubToast.error('Failed to cancel visit. Check console for errors.');
     }
 }
 
 async function completeSchedule(id) {
-    if (!confirm('Mark this visit as completed?')) {
-        return;
-    }
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Complete Visit',
+        message: 'Mark this visit as completed?',
+        confirmText: 'Complete',
+        cancelText: 'Cancel',
+        icon: 'ph-check-circle',
+        iconColor: '#10B981'
+    });
+    if (!confirmed) return;
 
     const success = await updateSchedule(id, { status: 'completed' });
     if (success) {
-        alert('Visit marked as completed.');
+        CareHubToast.success('Visit marked as completed.');
         await viewSchedule(id);
         if (document.getElementById('schedulesContent')) {
             await loadSchedules('upcoming');
         }
     } else {
-        alert('Failed to update visit status. Check console for errors.');
+        CareHubToast.error('Failed to update visit status. Check console for errors.');
     }
 }
 
@@ -3999,7 +4244,7 @@ async function completeSchedule(id) {
 async function viewTimesheet(id) {
     const timesheet = await getTimesheetById(id);
     if (!timesheet) {
-        alert('Timesheet not found');
+        CareHubToast.error('Timesheet not found');
         return;
     }
 
@@ -4110,7 +4355,7 @@ async function openCreateTimesheetModal() {
     const allVisits = [...schedules, ...scheduledVisits];
 
     if (allVisits.length === 0) {
-        alert('No completed or scheduled visits found. Create a visit first.');
+        CareHubToast.error('No completed or scheduled visits found. Create a visit first.');
         return;
     }
 
@@ -4197,11 +4442,11 @@ async function saveTimesheet(id = null) {
 
     // Validation
     if (!timesheetData.schedule_id || !timesheetData.caregiver_id || !timesheetData.client_id || !timesheetData.date) {
-        alert('Please select a visit');
+        CareHubToast.warning('Please select a visit');
         return;
     }
     if (!timesheetData.hours || timesheetData.hours <= 0) {
-        alert('Please enter valid hours worked');
+        CareHubToast.warning('Please enter valid hours worked');
         return;
     }
 
@@ -4209,14 +4454,14 @@ async function saveTimesheet(id = null) {
     if (id) {
         success = await updateTimesheet(id, timesheetData);
         if (success) {
-            alert('Timesheet updated successfully.');
+            CareHubToast.success('Timesheet updated successfully.');
             await viewTimesheet(id);
         }
     } else {
         const newTimesheet = await createTimesheet(timesheetData);
         success = !!newTimesheet;
         if (success) {
-            alert('Timesheet created successfully.');
+            CareHubToast.success('Timesheet created successfully.');
             closeModal();
         }
     }
@@ -4224,7 +4469,7 @@ async function saveTimesheet(id = null) {
     if (success && document.getElementById('timesheetsContent')) {
         await loadTimesheets(currentTimesheetFilter);
     } else if (!success) {
-        alert('Failed to save timesheet. Check console for errors.');
+        CareHubToast.error('Failed to save timesheet. Check console for errors.');
     }
 }
 
@@ -4234,7 +4479,7 @@ async function openEditTimesheetModal(id) {
     }
 
     if (!currentData) {
-        alert('Timesheet not found');
+        CareHubToast.error('Timesheet not found');
         return;
     }
 
@@ -4297,33 +4542,47 @@ async function openEditTimesheetModal(id) {
 }
 
 async function approveTimesheetUI(id) {
-    if (!confirm('Approve this timesheet?')) return;
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Approve Timesheet',
+        message: 'Approve this timesheet for payroll?',
+        confirmText: 'Approve',
+        icon: 'ph-check-circle',
+        iconColor: '#22C55E'
+    });
+    if (!confirmed) return;
 
     const success = await approveTimesheet(id, 'admin');
     if (success) {
-        alert('Timesheet approved successfully.');
+        CareHubToast.success('Timesheet approved successfully.');
         await viewTimesheet(id);
         if (document.getElementById('timesheetsContent')) {
             await loadTimesheets(currentTimesheetFilter);
         }
     } else {
-        alert('Failed to approve timesheet.');
+        CareHubToast.error('Failed to approve timesheet.');
     }
 }
 
 async function rejectTimesheetUI(id) {
-    const reason = prompt('Enter rejection reason:');
+    const reason = await CareHubConfirm.prompt({
+        title: 'Reject Timesheet',
+        message: 'Enter a reason for rejection:',
+        placeholder: 'Enter rejection reason...',
+        required: true,
+        icon: 'ph-x-circle',
+        iconColor: '#EF4444'
+    });
     if (reason === null) return;
 
     const success = await rejectTimesheet(id, reason, 'admin');
     if (success) {
-        alert('Timesheet rejected.');
+        CareHubToast.warning('Timesheet rejected.');
         await viewTimesheet(id);
         if (document.getElementById('timesheetsContent')) {
             await loadTimesheets(currentTimesheetFilter);
         }
     } else {
-        alert('Failed to reject timesheet.');
+        CareHubToast.error('Failed to reject timesheet.');
     }
 }
 
@@ -4337,12 +4596,12 @@ async function previewPayroll() {
     const mileageRate = parseFloat(document.getElementById('mileage-rate').value) || 0.67;
 
     if (!startDate || !endDate) {
-        alert('Please select both start and end dates');
+        CareHubToast.warning('Please select both start and end dates');
         return;
     }
 
     if (startDate > endDate) {
-        alert('Start date must be before end date');
+        CareHubToast.warning('Start date must be before end date');
         return;
     }
 
@@ -4544,7 +4803,7 @@ async function loadPayrollExportHistory() {
 
 function exportPayrollCSV() {
     if (!currentPayrollData) {
-        alert('Please preview payroll first');
+        CareHubToast.warning('Please preview payroll first');
         return;
     }
 
@@ -4630,7 +4889,7 @@ function exportPayrollCSV() {
 
 async function savePayrollExport() {
     if (!currentPayrollData) {
-        alert('Please preview payroll first');
+        CareHubToast.warning('Please preview payroll first');
         return;
     }
 
@@ -4648,10 +4907,10 @@ async function savePayrollExport() {
 
     const result = await createPayrollExport(exportData);
     if (result) {
-        alert('Payroll export saved to history');
+        CareHubToast.success('Payroll export saved to history.');
         await loadPayrollExportHistory();
     } else {
-        alert('Failed to save export history');
+        CareHubToast.error('Failed to save export history.');
     }
 }
 
@@ -4660,7 +4919,7 @@ async function savePayrollExport() {
 async function viewVisitUpdate(id) {
     const update = await getVisitUpdateById(id);
     if (!update) {
-        alert('Visit update not found');
+        CareHubToast.error('Visit update not found');
         return;
     }
 
@@ -4823,7 +5082,7 @@ async function openCreateVisitUpdateModal() {
     const allVisits = [...schedules, ...completed];
 
     if (allVisits.length === 0) {
-        alert('No scheduled or completed visits found. Create a visit first.');
+        CareHubToast.warning('No scheduled or completed visits found. Create a visit first.');
         return;
     }
 
@@ -4936,11 +5195,11 @@ async function saveVisitUpdate(id = null) {
 
     // Validation
     if (!updateData.schedule_id || !updateData.caregiver_id || !updateData.client_id || !updateData.visit_date) {
-        alert('Please select a visit');
+        CareHubToast.warning('Please select a visit');
         return;
     }
     if (!updateData.visit_summary || !updateData.visit_summary.trim()) {
-        alert('Please enter a visit summary');
+        CareHubToast.warning('Please enter a visit summary');
         return;
     }
 
@@ -4948,14 +5207,14 @@ async function saveVisitUpdate(id = null) {
     if (id) {
         success = await updateVisitUpdate(id, updateData);
         if (success) {
-            alert('Visit update saved successfully.');
+            CareHubToast.success('Visit update saved successfully.');
             await viewVisitUpdate(id);
         }
     } else {
         const newUpdate = await createVisitUpdate(updateData);
         success = !!newUpdate;
         if (success) {
-            alert('Visit update created successfully.');
+            CareHubToast.success('Visit update created successfully.');
             closeModal();
         }
     }
@@ -4963,53 +5222,74 @@ async function saveVisitUpdate(id = null) {
     if (success && document.getElementById('visitUpdatesContent')) {
         await loadVisitUpdates(currentVisitUpdateFilter);
     } else if (!success) {
-        alert('Failed to save visit update. Check console for errors.');
+        CareHubToast.error('Failed to save visit update. Check console for errors.');
     }
 }
 
 async function approveVisitUpdateUI(id) {
-    if (!confirm('Approve this visit update?')) return;
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Approve Visit Update',
+        message: 'Approve this visit update and make it visible to the family?',
+        confirmText: 'Approve',
+        icon: 'ph-check-circle',
+        iconColor: '#22C55E'
+    });
+    if (!confirmed) return;
 
     const success = await approveVisitUpdate(id, 'admin');
     if (success) {
-        alert('Visit update approved successfully.');
+        CareHubToast.success('Visit update approved successfully.');
         await viewVisitUpdate(id);
         if (document.getElementById('visitUpdatesContent')) {
             await loadVisitUpdates(currentVisitUpdateFilter);
         }
     } else {
-        alert('Failed to approve visit update.');
+        CareHubToast.error('Failed to approve visit update.');
     }
 }
 
 async function rejectVisitUpdateUI(id) {
-    const reason = prompt('Enter rejection reason:');
+    const reason = await CareHubConfirm.prompt({
+        title: 'Reject Visit Update',
+        message: 'Enter a reason for rejection:',
+        placeholder: 'Enter rejection reason...',
+        required: true,
+        icon: 'ph-x-circle',
+        iconColor: '#EF4444'
+    });
     if (reason === null) return;
 
     const success = await rejectVisitUpdate(id, reason, 'admin');
     if (success) {
-        alert('Visit update rejected.');
+        CareHubToast.warning('Visit update rejected.');
         await viewVisitUpdate(id);
         if (document.getElementById('visitUpdatesContent')) {
             await loadVisitUpdates(currentVisitUpdateFilter);
         }
     } else {
-        alert('Failed to reject visit update.');
+        CareHubToast.error('Failed to reject visit update.');
     }
 }
 
 async function markVisitUpdateInternalUI(id) {
-    if (!confirm('Mark this update as internal-only? It will not be visible to families.')) return;
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Mark as Internal',
+        message: 'Mark this update as internal-only? It will not be visible to families.',
+        confirmText: 'Mark Internal',
+        icon: 'ph-lock',
+        iconColor: '#6B7280'
+    });
+    if (!confirmed) return;
 
     const success = await markVisitUpdateInternal(id);
     if (success) {
-        alert('Visit update marked as internal.');
+        CareHubToast.info('Visit update marked as internal.');
         await viewVisitUpdate(id);
         if (document.getElementById('visitUpdatesContent')) {
             await loadVisitUpdates(currentVisitUpdateFilter);
         }
     } else {
-        alert('Failed to update visit update.');
+        CareHubToast.error('Failed to update visit update.');
     }
 }
 
@@ -5056,6 +5336,8 @@ window.updateListFilter = updateListFilter;
 window.applyListFilters = applyListFilters;
 window.clearListFilters = clearListFilters;
 window.parseLocalDate = parseLocalDate;
+window.parseLocalDateToDate = parseLocalDateToDate;
+window.ensureScheduleDateIsDate = ensureScheduleDateIsDate;
 window.formatDateForAPI = formatDateForAPI;
 
 // Timesheets

@@ -5,8 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SeniorSitters CareHub</title>
     <link rel="icon" href="data:,">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/design-system.css">
     <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/premium.css">
     <!-- Phosphor Icons - Clean, professional icon system -->
     <script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
     <!-- Supabase CDN -->
@@ -96,6 +100,9 @@
         </main>
     </div>
 
+    <!-- Sidebar overlay (mobile) -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
     <!-- Modal Container -->
     <div class="modal-overlay" id="modalOverlay">
         <div class="modal" id="modal">
@@ -115,14 +122,20 @@
     <!-- Scripts - Note: Supabase CDN is in head -->
     <script src="js/config.js"></script>
     <script src="js/state.js"></script>
+    <script src="js/supabase-auth.js"></script>
     <script src="js/auth.js"></script>
+    <script src="js/role-filter.js"></script>
+    <script src="js/toast.js"></script>
+    <script src="js/confirm-modal.js"></script>
     <script src="js/database.js"></script>
     <script src="js/refresh-coordinator.js"></script>
     <script src="js/realtime.js"></script>
     <script src="js/app.js"></script>
     <script>
         // Protect route - check auth immediately
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', async function() {
+            // Hydrate session from live Supabase token (no-op in DEV_MODE)
+            if (typeof initAuth === 'function') await initAuth();
             if (!requireAuth()) {
                 // Redirect handled in requireAuth
                 return;
