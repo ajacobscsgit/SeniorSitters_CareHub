@@ -4,62 +4,86 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SeniorSitters CareHub</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="css/design-system.css">
     <link rel="stylesheet" href="css/style.css">
+    <!-- Phosphor Icons - Clean, professional icon system -->
+    <script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
     <!-- Supabase CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body>
     <!-- Mobile Menu Toggle -->
-    <button class="mobile-menu-toggle" id="mobileMenuToggle">☰</button>
+    <button class="mobile-menu-toggle" id="mobileMenuToggle">
+        <i class="ph ph-list"></i>
+    </button>
 
     <div class="app-container">
         <!-- Sidebar Navigation -->
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-header">
-                <h2>👴👵 SeniorSitters</h2>
-                <p>CareHub Portal</p>
+            <div class="sidebar-branding">
+                <div class="sidebar-logo">
+                    <i class="ph ph-heartbeat"></i>
+                </div>
+                <div class="sidebar-titles">
+                    <h1 class="sidebar-company">SeniorSitters</h1>
+                    <span class="sidebar-product">CareHub Portal</span>
+                </div>
             </div>
             
-            <nav class="sidebar-nav">
-                <button class="nav-item active" data-page="dashboard">
-                    <span class="nav-icon">📊</span>
+            <nav class="sidebar-nav" id="sidebarNav">
+                <button class="nav-item active" data-page="dashboard" data-roles="admin_owner,co_owner,caregiver,client_family">
+                    <i class="ph ph-squares-four"></i>
                     <span>Dashboard</span>
                 </button>
-                <button class="nav-item" data-page="applications">
-                    <span class="nav-icon">📝</span>
+                <button class="nav-item" data-page="applications" data-roles="admin_owner,co_owner">
+                    <i class="ph ph-user-plus"></i>
                     <span>Applications</span>
                 </button>
-                <button class="nav-item" data-page="care-requests">
-                    <span class="nav-icon">🤝</span>
+                <button class="nav-item" data-page="care-requests" data-roles="admin_owner,co_owner">
+                    <i class="ph ph-handshake"></i>
                     <span>Care Requests</span>
                 </button>
-                <button class="nav-item" data-page="caregivers">
-                    <span class="nav-icon">👩‍⚕️</span>
+                <button class="nav-item" data-page="caregivers" data-roles="admin_owner,co_owner">
+                    <i class="ph ph-stethoscope"></i>
                     <span>Caregivers</span>
                 </button>
-                <button class="nav-item" data-page="clients">
-                    <span class="nav-icon">👥</span>
+                <button class="nav-item" data-page="clients" data-roles="admin_owner,co_owner,caregiver">
+                    <i class="ph ph-users"></i>
                     <span>Clients</span>
                 </button>
-                <button class="nav-item" data-page="schedules">
-                    <span class="nav-icon">📅</span>
+                <button class="nav-item" data-page="schedules" data-roles="admin_owner,co_owner,caregiver,client_family">
+                    <i class="ph ph-calendar"></i>
                     <span>Schedules</span>
                 </button>
-                <button class="nav-item" data-page="settings">
-                    <span class="nav-icon">⚙️</span>
+                <button class="nav-item" data-page="timesheets" data-roles="admin_owner,co_owner,caregiver">
+                    <i class="ph ph-clock"></i>
+                    <span>Timesheets</span>
+                </button>
+                <button class="nav-item" data-page="visit-updates" data-roles="admin_owner,co_owner,caregiver,client_family">
+                    <i class="ph ph-clipboard-text"></i>
+                    <span>Visit Updates</span>
+                </button>
+                <button class="nav-item" data-page="settings" data-roles="admin_owner,co_owner,caregiver,client_family">
+                    <i class="ph ph-gear"></i>
                     <span>Settings</span>
                 </button>
             </nav>
             
             <div class="sidebar-footer">
                 <div class="user-info">
-                    <div class="user-avatar">👤</div>
+                    <div class="user-avatar">
+                        <i class="ph ph-user"></i>
+                    </div>
                     <div class="user-details">
-                        <div class="user-name">Admin User</div>
-                        <div class="user-role">Administrator</div>
+                        <div class="user-name" id="userName">Admin User</div>
+                        <div class="user-role" id="userRole">Admin/Owner</div>
                     </div>
                 </div>
-                <button class="logout-btn" id="logoutBtn">🚪 Logout</button>
+                <button class="logout-btn" id="logoutBtn">
+                    <i class="ph ph-sign-out"></i>
+                    <span>Logout</span>
+                </button>
             </div>
         </aside>
 
@@ -90,8 +114,11 @@
 
     <!-- Scripts - Note: Supabase CDN is in head -->
     <script src="js/config.js"></script>
+    <script src="js/state.js"></script>
     <script src="js/auth.js"></script>
     <script src="js/database.js"></script>
+    <script src="js/refresh-coordinator.js"></script>
+    <script src="js/realtime.js"></script>
     <script src="js/app.js"></script>
     <script>
         // Protect route - check auth immediately

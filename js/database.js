@@ -796,7 +796,7 @@ async function markNotificationRead(id) {
 // ==================== DASHBOARD STATS ====================
 
 /**
- * Get dashboard statistics
+ * Get dashboard statistics for Command Center
  * @returns {Promise<Object>}
  */
 async function getDashboardStats() {
@@ -806,10 +806,20 @@ async function getDashboardStats() {
             pendingCareRequests: 0,
             totalCaregivers: 0,
             totalClients: 0,
-            onboardingCaregivers: 0
+            onboardingCaregivers: 0,
+            activeCaregivers: 0,
+            activeClients: 0,
+            todaysVisits: 0,
+            pendingTimesheets: 0,
+            pendingVisitUpdates: 0,
+            unassignedVisits: 0,
+            cancelledVisits: 0,
+            rejectedTimesheets: 0
         };
     }
-    
+
+    const today = formatDateForAPI(new Date());
+
     try {
         // Get counts in parallel
         const [
@@ -817,21 +827,45 @@ async function getDashboardStats() {
             { count: pendingCareRequests },
             { count: totalCaregivers },
             { count: totalClients },
-            { count: onboardingCaregivers }
+            { count: onboardingCaregivers },
+            { count: activeCaregivers },
+            { count: activeClients },
+            { count: todaysVisits },
+            { count: pendingTimesheets },
+            { count: pendingVisitUpdates },
+            { count: unassignedVisits },
+            { count: cancelledVisits },
+            { count: rejectedTimesheets }
         ] = await Promise.all([
             supabaseClient.from(TABLES.APPLICATIONS).select('*', { count: 'exact', head: true }).eq('status', 'new'),
             supabaseClient.from(TABLES.CARE_REQUESTS).select('*', { count: 'exact', head: true }).eq('status', 'new'),
             supabaseClient.from(TABLES.CAREGIVERS).select('*', { count: 'exact', head: true }),
             supabaseClient.from(TABLES.CLIENTS).select('*', { count: 'exact', head: true }),
-            supabaseClient.from(TABLES.CAREGIVERS).select('*', { count: 'exact', head: true }).eq('status', 'onboarding')
+            supabaseClient.from(TABLES.CAREGIVERS).select('*', { count: 'exact', head: true }).eq('status', 'onboarding'),
+            supabaseClient.from(TABLES.CAREGIVERS).select('*', { count: 'exact', head: true }).eq('status', 'active'),
+            supabaseClient.from(TABLES.CLIENTS).select('*', { count: 'exact', head: true }).eq('status', 'active'),
+            supabaseClient.from(TABLES.SCHEDULES).select('*', { count: 'exact', head: true }).eq('date', today).not('status', 'eq', 'cancelled'),
+            supabaseClient.from(TABLES.TIMESHEETS).select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+            supabaseClient.from(TABLES.VISIT_UPDATES).select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+            supabaseClient.from(TABLES.SCHEDULES).select('*', { count: 'exact', head: true }).is('caregiver_id', null).not('status', 'eq', 'cancelled'),
+            supabaseClient.from(TABLES.SCHEDULES).select('*', { count: 'exact', head: true }).eq('status', 'cancelled'),
+            supabaseClient.from(TABLES.TIMESHEETS).select('*', { count: 'exact', head: true }).eq('status', 'rejected')
         ]);
-        
+
         return {
             newApplications: newApplications || 0,
             pendingCareRequests: pendingCareRequests || 0,
             totalCaregivers: totalCaregivers || 0,
             totalClients: totalClients || 0,
-            onboardingCaregivers: onboardingCaregivers || 0
+            onboardingCaregivers: onboardingCaregivers || 0,
+            activeCaregivers: activeCaregivers || 0,
+            activeClients: activeClients || 0,
+            todaysVisits: todaysVisits || 0,
+            pendingTimesheets: pendingTimesheets || 0,
+            pendingVisitUpdates: pendingVisitUpdates || 0,
+            unassignedVisits: unassignedVisits || 0,
+            cancelledVisits: cancelledVisits || 0,
+            rejectedTimesheets: rejectedTimesheets || 0
         };
     } catch (e) {
         console.error('Error fetching dashboard stats:', e);
@@ -840,9 +874,314 @@ async function getDashboardStats() {
             pendingCareRequests: 0,
             totalCaregivers: 0,
             totalClients: 0,
-            onboardingCaregivers: 0
+            onboardingCaregivers: 0,
+            activeCaregivers: 0,
+            activeClients: 0,
+            todaysVisits: 0,
+            pendingTimesheets: 0,
+            pendingVisitUpdates: 0,
+            unassignedVisits: 0,
+            cancelledVisits: 0,
+            rejectedTimesheets: 0
         };
     }
+}
+
+/**
+ * Get today's schedule with caregiver and client details
+ * @returns {Promise<Array>}
+ */
+async function getTodaysSchedule() {
+    if (!supabaseClient) return [];
+
+    const today = formatDateForAPI(new Date());
+
+    console.log('[CareHub] Fetching schedule for today:', today);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .select(`
+            *,
+            caregiver:caregiver_id (id, name, email, phone),
+            client:client_id (id, care_for, name, address)
+        `)
+        .eq('date', today)
+        .not('status', 'eq', 'cancelled')
+        .order('start_time', { ascending: true });
+
+    if (error) {
+        console.error('[CareHub] ERROR fetching today\'s schedule:', error);
+        return [];
+    }
+
+    return data || [];
+}
+
+/**
+ * Get recent activity for dashboard feed
+ * @param {number} limit - Number of activities to fetch
+ * @returns {Promise<Array>}
+ */
+async function getRecentActivity(limit = 10) {
+    if (!supabaseClient) return [];
+
+    console.log('[CareHub] Fetching recent activity');
+
+    // Get recent records from multiple tables
+    const [
+        { data: applications },
+        { data: careRequests },
+        { data: timesheets },
+        { data: visitUpdates },
+        { data: schedules }
+    ] = await Promise.all([
+        supabaseClient.from(TABLES.APPLICATIONS).select('*').order('updated_at', { ascending: false }).limit(limit),
+        supabaseClient.from(TABLES.CARE_REQUESTS).select('*').order('updated_at', { ascending: false }).limit(limit),
+        supabaseClient.from(TABLES.TIMESHEETS).select('*').order('updated_at', { ascending: false }).limit(limit),
+        supabaseClient.from(TABLES.VISIT_UPDATES).select('*').order('updated_at', { ascending: false }).limit(limit),
+        supabaseClient.from(TABLES.SCHEDULES).select('*').order('updated_at', { ascending: false }).limit(limit)
+    ]);
+
+    const activities = [];
+
+    // Process applications
+    (applications || []).forEach(app => {
+        if (app.status === 'approved') {
+            activities.push({
+                type: 'application_approved',
+                title: 'Application Approved',
+                message: `${app.name || 'Someone'} was approved as a caregiver`,
+                timestamp: app.updated_at,
+                icon: 'ph-check-circle',
+                color: 'success'
+            });
+        } else if (app.status === 'denied') {
+            activities.push({
+                type: 'application_denied',
+                title: 'Application Denied',
+                message: `${app.name || 'Someone'}'s application was denied`,
+                timestamp: app.updated_at,
+                icon: 'ph-x-circle',
+                color: 'danger'
+            });
+        } else if (app.status === 'new') {
+            activities.push({
+                type: 'application_received',
+                title: 'New Application',
+                message: `Application received from ${app.name || 'someone'}`,
+                timestamp: app.created_at,
+                icon: 'ph-user-plus',
+                color: 'primary'
+            });
+        }
+    });
+
+    // Process care requests
+    (careRequests || []).forEach(req => {
+        if (req.status === 'converted') {
+            activities.push({
+                type: 'client_converted',
+                title: 'Client Converted',
+                message: `${req.care_for || 'A care request'} became an active client`,
+                timestamp: req.updated_at,
+                icon: 'ph-confetti',
+                color: 'success'
+            });
+        } else if (req.status === 'new') {
+            activities.push({
+                type: 'care_request',
+                title: 'New Care Request',
+                message: `Care request from ${req.requester_name || 'someone'}`,
+                timestamp: req.created_at,
+                icon: 'ph-handshake',
+                color: 'primary'
+            });
+        }
+    });
+
+    // Process timesheets
+    (timesheets || []).forEach(ts => {
+        if (ts.status === 'approved') {
+            activities.push({
+                type: 'timesheet_approved',
+                title: 'Timesheet Approved',
+                message: `Timesheet for ${ts.date} was approved`,
+                timestamp: ts.updated_at,
+                icon: 'ph-currency-dollar',
+                color: 'success'
+            });
+        } else if (ts.status === 'rejected') {
+            activities.push({
+                type: 'timesheet_rejected',
+                title: 'Timesheet Rejected',
+                message: `Timesheet for ${ts.date} was rejected`,
+                timestamp: ts.updated_at,
+                icon: 'ph-prohibit',
+                color: 'danger'
+            });
+        }
+    });
+
+    // Process visit updates
+    (visitUpdates || []).forEach(vu => {
+        if (vu.status === 'approved') {
+            activities.push({
+                type: 'visit_update_approved',
+                title: 'Visit Update Approved',
+                message: `Visit update was approved`,
+                timestamp: vu.updated_at,
+                icon: 'ph-check',
+                color: 'success'
+            });
+        } else if (vu.status === 'rejected') {
+            activities.push({
+                type: 'visit_update_rejected',
+                title: 'Visit Update Rejected',
+                message: `Visit update was rejected`,
+                timestamp: vu.updated_at,
+                icon: 'ph-x',
+                color: 'danger'
+            });
+        }
+    });
+
+    // Process schedules
+    (schedules || []).forEach(sch => {
+        if (sch.status === 'completed') {
+            activities.push({
+                type: 'visit_completed',
+                title: 'Visit Completed',
+                message: `Visit on ${sch.date} marked complete`,
+                timestamp: sch.updated_at,
+                icon: 'ph-check',
+                color: 'success'
+            });
+        } else if (sch.status === 'cancelled') {
+            activities.push({
+                type: 'visit_cancelled',
+                title: 'Visit Cancelled',
+                message: `Visit on ${sch.date} was cancelled`,
+                timestamp: sch.updated_at,
+                icon: 'ph-prohibit',
+                color: 'danger'
+            });
+        }
+    });
+
+    // Sort by timestamp and take top limit
+    return activities
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, limit);
+}
+
+/**
+ * Get urgent alerts for dashboard
+ * @returns {Promise<Array>}
+ */
+async function getDashboardAlerts() {
+    if (!supabaseClient) return [];
+
+    console.log('[CareHub] Fetching dashboard alerts');
+
+    const alerts = [];
+
+    // Get unassigned visits
+    const { data: unassigned } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .select('id, date, start_time, client:client_id (care_for)')
+        .is('caregiver_id', null)
+        .not('status', 'eq', 'cancelled')
+        .gte('date', formatDateForAPI(new Date()))
+        .order('date', { ascending: true })
+        .limit(5);
+
+    (unassigned || []).forEach(u => {
+        alerts.push({
+            type: 'unassigned',
+            severity: 'urgent',
+            title: 'Unassigned Visit',
+            message: `${u.client?.care_for || 'A visit'} on ${formatDate(u.date)} at ${formatTime(u.start_time)} needs a caregiver`,
+            link: `/schedules`,
+            action: 'Assign Now',
+            icon: 'ph-warning-circle'
+        });
+    });
+
+    // Get pending onboarding
+    const { data: onboarding } = await supabaseClient
+        .from(TABLES.CAREGIVERS)
+        .select('id, name')
+        .eq('status', 'onboarding')
+        .limit(5);
+
+    (onboarding || []).forEach(o => {
+        alerts.push({
+            type: 'onboarding',
+            severity: 'warning',
+            title: 'Pending Onboarding',
+            message: `${o.name} is waiting for onboarding completion`,
+            link: `/caregivers`,
+            action: 'Review',
+            icon: 'ph-hand-waving'
+        });
+    });
+
+    // Get rejected timesheets
+    const { data: rejectedTimesheets } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('id, date, caregiver:caregiver_id (name)')
+        .eq('status', 'rejected')
+        .limit(3);
+
+    (rejectedTimesheets || []).forEach(ts => {
+        alerts.push({
+            type: 'timesheet_rejected',
+            severity: 'warning',
+            title: 'Rejected Timesheet',
+            message: `Timesheet for ${ts.caregiver?.name || 'caregiver'} on ${formatDate(ts.date)} was rejected`,
+            link: `/timesheets`,
+            action: 'Review',
+            icon: 'ph-clipboard-text'
+        });
+    });
+
+    // Get pending timesheets
+    const { count: pendingTsCount } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'pending');
+
+    if (pendingTsCount > 0) {
+        alerts.push({
+            type: 'pending_timesheets',
+            severity: 'info',
+            title: 'Pending Timesheets',
+            message: `${pendingTsCount} timesheet${pendingTsCount > 1 ? 's' : ''} awaiting approval`,
+            link: `/timesheets`,
+            action: 'Review',
+            icon: 'ph-hourglass'
+        });
+    }
+
+    // Get pending visit updates
+    const { count: pendingVuCount } = await supabaseClient
+        .from(TABLES.VISIT_UPDATES)
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'pending');
+
+    if (pendingVuCount > 0) {
+        alerts.push({
+            type: 'pending_updates',
+            severity: 'info',
+            title: 'Pending Visit Updates',
+            message: `${pendingVuCount} visit update${pendingVuCount > 1 ? 's' : ''} awaiting approval`,
+            link: `/visit-updates`,
+            action: 'Review',
+            icon: 'ph-megaphone'
+        });
+    }
+
+    return alerts;
 }
 
 // ==================== SCHEDULES ====================
@@ -885,6 +1224,33 @@ async function getSchedules(filters = {}) {
 
     if (error) {
         console.error('[CareHub] Error fetching schedules:', error);
+        return [];
+    }
+
+    return data || [];
+}
+
+/**
+ * Get schedules for a specific month (for calendar view)
+ * @param {number} year - Year
+ * @param {number} month - Month (0-11)
+ * @returns {Promise<Array>}
+ */
+async function getSchedulesForMonth(year, month) {
+    if (!supabaseClient) return [];
+
+    const startDate = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+    const endDate = `${year}-${String(month + 1).padStart(2, '0')}-${new Date(year, month + 1, 0).getDate()}`;
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .select('date, status, caregiver_id')
+        .gte('date', startDate)
+        .lte('date', endDate)
+        .not('status', 'eq', 'cancelled');
+
+    if (error) {
+        console.error('[CareHub] Error fetching month schedules:', error);
         return [];
     }
 
@@ -1041,6 +1407,440 @@ async function cancelSchedule(id, reason = '') {
     return true;
 }
 
+// ==================== TIMESHEETS ====================
+
+/**
+ * Get timesheets with optional filters
+ * @param {Object} filters - Optional filters
+ * @param {string} filters.caregiver_id - Filter by caregiver
+ * @param {string} filters.client_id - Filter by client
+ * @param {string} filters.schedule_id - Filter by schedule
+ * @param {string} filters.status - Filter by status
+ * @param {string} filters.date_from - Start date (YYYY-MM-DD)
+ * @param {string} filters.date_to - End date (YYYY-MM-DD)
+ * @returns {Promise<Array>}
+ */
+async function getTimesheets(filters = {}) {
+    if (!supabaseClient) return [];
+
+    console.log('[CareHub] Fetching timesheets with filters:', filters);
+
+    let query = supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select(`
+            *,
+            caregiver:caregiver_id (id, name),
+            client:client_id (id, care_for, name),
+            schedule:schedule_id (id, date, start_time, end_time)
+        `)
+        .order('date', { ascending: false })
+        .order('created_at', { ascending: false });
+
+    // Apply filters
+    if (filters.caregiver_id) {
+        query = query.eq('caregiver_id', filters.caregiver_id);
+    }
+    if (filters.client_id) {
+        query = query.eq('client_id', filters.client_id);
+    }
+    if (filters.schedule_id) {
+        query = query.eq('schedule_id', filters.schedule_id);
+    }
+    if (filters.status) {
+        query = query.eq('status', filters.status);
+    }
+    if (filters.date_from) {
+        query = query.gte('date', filters.date_from);
+    }
+    if (filters.date_to) {
+        query = query.lte('date', filters.date_to);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+        console.error('[CareHub] ERROR fetching timesheets:', error);
+        return [];
+    }
+
+    console.log('[CareHub] Timesheets fetched:', data?.length || 0);
+    return data || [];
+}
+
+/**
+ * Get a single timesheet by ID
+ * @param {string} id
+ * @returns {Promise<Object|null>}
+ */
+async function getTimesheetById(id) {
+    if (!supabaseClient) return null;
+
+    console.log('[CareHub] Fetching timesheet:', id);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select(`
+            *,
+            caregiver:caregiver_id (id, name),
+            client:client_id (id, care_for, name),
+            schedule:schedule_id (id, date, start_time, end_time, service_type, location)
+        `)
+        .eq('id', id)
+        .single();
+
+    if (error) {
+        console.error('[CareHub] ERROR fetching timesheet:', error);
+        return null;
+    }
+
+    return data;
+}
+
+/**
+ * Create a new timesheet
+ * @param {Object} timesheetData
+ * @returns {Promise<Object|null>}
+ */
+async function createTimesheet(timesheetData) {
+    if (!supabaseClient) return null;
+
+    console.log('[CareHub] Creating timesheet:', timesheetData);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .insert([timesheetData])
+        .select()
+        .single();
+
+    if (error) {
+        console.error('[CareHub] ERROR creating timesheet:', error);
+        return null;
+    }
+
+    console.log('[CareHub] Timesheet created:', data.id);
+    return data;
+}
+
+/**
+ * Update a timesheet
+ * @param {string} id
+ * @param {Object} updates
+ * @returns {Promise<boolean>}
+ */
+async function updateTimesheet(id, updates) {
+    if (!supabaseClient) return false;
+
+    console.log('[CareHub] Updating timesheet:', id, updates);
+
+    const { error } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .update({
+            ...updates,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', id);
+
+    if (error) {
+        console.error('[CareHub] ERROR updating timesheet:', error);
+        return false;
+    }
+
+    console.log('[CareHub] Timesheet updated successfully');
+    return true;
+}
+
+/**
+ * Approve a timesheet
+ * @param {string} id
+ * @param {string} reviewedBy - Admin user identifier
+ * @returns {Promise<boolean>}
+ */
+async function approveTimesheet(id, reviewedBy) {
+    return await updateTimesheet(id, {
+        status: 'approved',
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: reviewedBy
+    });
+}
+
+/**
+ * Reject a timesheet
+ * @param {string} id
+ * @param {string} reason - Rejection reason
+ * @param {string} reviewedBy - Admin user identifier
+ * @returns {Promise<boolean>}
+ */
+async function rejectTimesheet(id, reason, reviewedBy) {
+    return await updateTimesheet(id, {
+        status: 'rejected',
+        notes: reason,
+        rejection_reason: reason,
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: reviewedBy
+    });
+}
+
+// ==================== PAYROLL EXPORTS ====================
+
+/**
+ * Get payroll export history
+ * @returns {Promise<Array>}
+ */
+async function getPayrollExports() {
+    if (!supabaseClient) return [];
+
+    console.log('[CareHub] Fetching payroll exports');
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.PAYROLL_EXPORTS)
+        .select('*')
+        .order('created_at', { ascending: false });
+
+    if (error) {
+        console.error('[CareHub] ERROR fetching payroll exports:', error);
+        return [];
+    }
+
+    return data || [];
+}
+
+/**
+ * Get approved timesheets for payroll calculation
+ * @param {string} dateFrom - Start date (YYYY-MM-DD)
+ * @param {string} dateTo - End date (YYYY-MM-DD)
+ * @returns {Promise<Array>}
+ */
+async function getApprovedTimesheetsForPayroll(dateFrom, dateTo) {
+    if (!supabaseClient) return [];
+
+    console.log('[CareHub] Fetching approved timesheets for payroll:', dateFrom, 'to', dateTo);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select(`
+            *,
+            caregiver:caregiver_id (id, name, email, pay_rate)
+        `)
+        .eq('status', 'approved')
+        .gte('date', dateFrom)
+        .lte('date', dateTo);
+
+    if (error) {
+        console.error('[CareHub] ERROR fetching approved timesheets:', error);
+        return [];
+    }
+
+    return data || [];
+}
+
+/**
+ * Create a payroll export record
+ * @param {Object} exportData
+ * @returns {Promise<Object|null>}
+ */
+async function createPayrollExport(exportData) {
+    if (!supabaseClient) return null;
+
+    console.log('[CareHub] Creating payroll export:', exportData);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.PAYROLL_EXPORTS)
+        .insert([exportData])
+        .select()
+        .single();
+
+    if (error) {
+        console.error('[CareHub] ERROR creating payroll export:', error);
+        return null;
+    }
+
+    console.log('[CareHub] Payroll export created:', data.id);
+    return data;
+}
+
+// ==================== VISIT UPDATES ====================
+
+/**
+ * Get visit updates with optional filters
+ * @param {Object} filters - Optional filters
+ * @param {string} filters.caregiver_id - Filter by caregiver
+ * @param {string} filters.client_id - Filter by client
+ * @param {string} filters.schedule_id - Filter by schedule
+ * @param {string} filters.status - Filter by status
+ * @param {string} filters.visit_date_from - Start visit date
+ * @param {string} filters.visit_date_to - End visit date
+ * @returns {Promise<Array>}
+ */
+async function getVisitUpdates(filters = {}) {
+    if (!supabaseClient) return [];
+
+    console.log('[CareHub] Fetching visit updates with filters:', filters);
+
+    let query = supabaseClient
+        .from(TABLES.VISIT_UPDATES)
+        .select(`
+            *,
+            caregiver:caregiver_id (id, name),
+            client:client_id (id, care_for, name),
+            schedule:schedule_id (id, date, start_time, end_time)
+        `)
+        .order('visit_date', { ascending: false })
+        .order('created_at', { ascending: false });
+
+    // Apply filters
+    if (filters.caregiver_id) {
+        query = query.eq('caregiver_id', filters.caregiver_id);
+    }
+    if (filters.client_id) {
+        query = query.eq('client_id', filters.client_id);
+    }
+    if (filters.schedule_id) {
+        query = query.eq('schedule_id', filters.schedule_id);
+    }
+    if (filters.status) {
+        query = query.eq('status', filters.status);
+    }
+    if (filters.visit_date_from) {
+        query = query.gte('visit_date', filters.visit_date_from);
+    }
+    if (filters.visit_date_to) {
+        query = query.lte('visit_date', filters.visit_date_to);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+        console.error('[CareHub] ERROR fetching visit updates:', error);
+        return [];
+    }
+
+    console.log('[CareHub] Visit updates fetched:', data?.length || 0);
+    return data || [];
+}
+
+/**
+ * Get a single visit update by ID
+ * @param {string} id
+ * @returns {Promise<Object|null>}
+ */
+async function getVisitUpdateById(id) {
+    if (!supabaseClient) return null;
+
+    console.log('[CareHub] Fetching visit update:', id);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.VISIT_UPDATES)
+        .select(`
+            *,
+            caregiver:caregiver_id (id, name),
+            client:client_id (id, care_for, name),
+            schedule:schedule_id (id, date, start_time, end_time, service_type, location)
+        `)
+        .eq('id', id)
+        .single();
+
+    if (error) {
+        console.error('[CareHub] ERROR fetching visit update:', error);
+        return null;
+    }
+
+    return data;
+}
+
+/**
+ * Create a new visit update
+ * @param {Object} updateData
+ * @returns {Promise<Object|null>}
+ */
+async function createVisitUpdate(updateData) {
+    if (!supabaseClient) return null;
+
+    console.log('[CareHub] Creating visit update:', updateData);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.VISIT_UPDATES)
+        .insert([updateData])
+        .select()
+        .single();
+
+    if (error) {
+        console.error('[CareHub] ERROR creating visit update:', error);
+        return null;
+    }
+
+    console.log('[CareHub] Visit update created:', data.id);
+    return data;
+}
+
+/**
+ * Update a visit update
+ * @param {string} id
+ * @param {Object} updates
+ * @returns {Promise<boolean>}
+ */
+async function updateVisitUpdate(id, updates) {
+    if (!supabaseClient) return false;
+
+    console.log('[CareHub] Updating visit update:', id, updates);
+
+    const { error } = await supabaseClient
+        .from(TABLES.VISIT_UPDATES)
+        .update({
+            ...updates,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', id);
+
+    if (error) {
+        console.error('[CareHub] ERROR updating visit update:', error);
+        return false;
+    }
+
+    console.log('[CareHub] Visit update updated successfully');
+    return true;
+}
+
+/**
+ * Approve a visit update
+ * @param {string} id
+ * @param {string} reviewedBy - Admin user identifier
+ * @returns {Promise<boolean>}
+ */
+async function approveVisitUpdate(id, reviewedBy) {
+    return await updateVisitUpdate(id, {
+        status: 'approved',
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: reviewedBy
+    });
+}
+
+/**
+ * Reject a visit update
+ * @param {string} id
+ * @param {string} reason - Rejection reason
+ * @param {string} reviewedBy - Admin user identifier
+ * @returns {Promise<boolean>}
+ */
+async function rejectVisitUpdate(id, reason, reviewedBy) {
+    return await updateVisitUpdate(id, {
+        status: 'rejected',
+        admin_notes: reason,
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: reviewedBy
+    });
+}
+
+/**
+ * Mark visit update as internal only
+ * @param {string} id
+ * @returns {Promise<boolean>}
+ */
+async function markVisitUpdateInternal(id) {
+    return await updateVisitUpdate(id, {
+        status: 'internal_only'
+    });
+}
+
 // Export for use in other modules
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
@@ -1065,8 +1865,28 @@ if (typeof module !== 'undefined' && module.exports) {
         createSchedule,
         updateSchedule,
         cancelSchedule,
+        getTimesheets,
+        getTimesheetById,
+        createTimesheet,
+        updateTimesheet,
+        approveTimesheet,
+        rejectTimesheet,
+        getVisitUpdates,
+        getVisitUpdateById,
+        createVisitUpdate,
+        updateVisitUpdate,
+        approveVisitUpdate,
+        rejectVisitUpdate,
+        markVisitUpdateInternal,
+        getTodaysSchedule,
+        getRecentActivity,
+        getDashboardAlerts,
+        getPayrollExports,
+        getApprovedTimesheetsForPayroll,
+        createPayrollExport,
         getDashboardStats,
         getUnreadNotifications,
-        createNotification
+        createNotification,
+        getSchedulesForMonth
     };
 }

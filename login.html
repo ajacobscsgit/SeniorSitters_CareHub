@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - SeniorSitters CareHub</title>
     <link rel="stylesheet" href="css/style.css">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
 </head>
 <body class="login-page">
     <div class="login-container">
@@ -22,7 +23,7 @@
                     type="email" 
                     id="email" 
                     name="email" 
-                    placeholder="admin@seniorsittersco.com"
+                    placeholder="admin@ruknanalytics.com"
                     required
                     autocomplete="email"
                 >
@@ -34,7 +35,7 @@
                     type="password" 
                     id="password" 
                     name="password" 
-                    placeholder="••••••"
+                    placeholder="demo123"
                     required
                     autocomplete="current-password"
                 >
@@ -45,9 +46,31 @@
             </button>
         </form>
         
-        <p class="text-center mt-2" style="font-size: 0.85rem; color: var(--warm-muted);">
-            Demo: admin@seniorsittersco.com / demo123
-        </p>
+        <!-- Demo Login Buttons - For Testing Role-Based Views -->
+        <div class="demo-login-section">
+            <div class="demo-divider">
+                <span>Quick Demo Login</span>
+            </div>
+            <div class="demo-buttons">
+                <button class="demo-btn demo-admin" onclick="demoLogin('admin@ruknanalytics.com')">
+                    <i class="ph ph-crown"></i>
+                    <span>Admin/Owner</span>
+                </button>
+                <button class="demo-btn demo-coowner" onclick="demoLogin('owner@seniorsittersco.com')">
+                    <i class="ph ph-user-gear"></i>
+                    <span>Co-Owner</span>
+                </button>
+                <button class="demo-btn demo-caregiver" onclick="demoLogin('caregiver@seniorsittersco.com')">
+                    <i class="ph ph-stethoscope"></i>
+                    <span>Caregiver</span>
+                </button>
+                <button class="demo-btn demo-family" onclick="demoLogin('family@seniorsittersco.com')">
+                    <i class="ph ph-users"></i>
+                    <span>Client/Family</span>
+                </button>
+            </div>
+            <p class="demo-note">All passwords: <code>demo123</code></p>
+        </div>
     </div>
 
     <script src="js/config.js"></script>
@@ -56,6 +79,15 @@
         // Check if already logged in
         if (isAuthenticated()) {
             window.location.href = 'index.html';
+        }
+
+        // Demo login helper - fills fields and logs in directly
+        function demoLogin(email) {
+            document.getElementById('email').value = email;
+            document.getElementById('password').value = 'demo123';
+            
+            // Trigger form submission
+            document.getElementById('loginForm').dispatchEvent(new Event('submit'));
         }
 
         // Handle login form
