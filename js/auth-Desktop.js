@@ -18,7 +18,7 @@ const LEGACY_ROLE_MAP = {
  * @returns {boolean}
  */
 function isAuthenticated() {
-    const session = localStorage.getItem(AUTH_KEY);
+    const session = sessionStorage.getItem(AUTH_KEY);
     if (!session) return false;
     
     try {
@@ -69,7 +69,7 @@ function login(email, password) {
             name: user.name,
             timestamp: Date.now()
         };
-        localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
         return { success: true };
     }
     
@@ -80,7 +80,7 @@ function login(email, password) {
  * Logout and clear session
  */
 function logout() {
-    localStorage.removeItem(AUTH_KEY);
+    sessionStorage.removeItem(AUTH_KEY);
     window.location.href = 'login.html';
 }
 
@@ -104,7 +104,7 @@ function getSession() {
     if (!isAuthenticated()) return null;
     
     try {
-        const session = JSON.parse(localStorage.getItem(AUTH_KEY));
+        const session = JSON.parse(sessionStorage.getItem(AUTH_KEY));
         // Normalize legacy roles
         if (session && session.role) {
             session.role = normalizeRole(session.role);
@@ -224,7 +224,7 @@ function updateActivity() {
     const session = getSession();
     if (session) {
         session.timestamp = Date.now();
-        localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
     }
 }
 

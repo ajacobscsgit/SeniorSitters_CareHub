@@ -2,9 +2,11 @@
 
 ## Overview
 
-The Training Hub gives caregivers a dedicated portal area for onboarding, assigned training, company resources, and emergency contacts. Admins can manage all content and track caregiver progress.
+The Training Hub gives caregivers a dedicated portal area for onboarding, assigned training, company resources, and emergency contacts. Admins can manage all content and track caregiver progress with deadlines, overdue tracking, and completion statistics.
 
 **Navigation:** Sidebar → Training Hub (visible to `admin_owner`, `co_owner`, `caregiver`)
+
+**Caregiver Profile Tabs:** Each caregiver profile now includes tabs for Training, Onboarding, Documents, and Notes with full progress tracking and admin management tools.
 
 ---
 
@@ -13,13 +15,15 @@ The Training Hub gives caregivers a dedicated portal area for onboarding, assign
 ### 1. Training
 - Card-based grid of training modules
 - **Admin view:** See all modules (active + inactive), assign to caregivers, edit, delete
-- **Caregiver view:** See only active modules assigned to them, with status (assigned / in_progress / completed / overdue), due date, and complete/acknowledge buttons
-- Modules with `requires_acknowledgement = true` show an "Acknowledge & Complete" button instead of "Mark Complete"
+- **Caregiver view:** See only active modules assigned to them, with status (not_started / in_progress / completed / overdue), due date, and complete/acknowledge buttons
+- Modules with `type = 'acknowledgement'` show an "Acknowledge & Complete" button
 - Required modules are highlighted with an amber left border
+- **Deadline tracking:** Shows "Due in X days", "Due tomorrow", "Due today", or "Overdue by X days"
 
 ### 2. Onboarding
 - **Admin view:** Table of all caregivers with progress bars, per-step checkboxes, background check status, and an Edit button
-- **Caregiver view:** Personal progress bar with 7 checklist items + background check status. Admin notes shown if set.
+- **Caregiver view:** Personal progress bar with 8 default checklist items + background check status. Admin notes shown if set.
+- **Caregiver Profile Tab:** Detailed onboarding progress with step-by-step checklist, completion percentage, flag status, and due date tracking
 
 ### 3. Resources
 - Card grid of company resources (handbook, policies, contacts, mileage, etc.)
@@ -37,13 +41,15 @@ The Training Hub gives caregivers a dedicated portal area for onboarding, assign
 
 ## Database Tables
 
-Run: `supabase/migrations/20260524_training_hub.sql`
+Run: `supabase/migrations/caregiver_training_tables.sql`
 
 | Table | Purpose |
 |---|---|
-| `training_modules` | Reusable training content (video, doc, link, quiz, photo guide) |
-| `training_assignments` | Caregiver ↔ module assignments with status + completion tracking |
-| `onboarding_checklist` | One row per caregiver; 7 boolean steps + background check status |
+| `training_modules` | Reusable training content (video, document, photo, quiz, acknowledgement) |
+| `caregiver_training_assignments` | Caregiver ↔ module assignments with status, due dates, completion tracking, scores |
+| `onboarding_steps` | Master list of onboarding checklist items (8 default steps) |
+| `caregiver_onboarding_progress` | Per-caregiver progress through onboarding steps with status tracking |
+| `onboarding_checklist` | Legacy: One row per caregiver; boolean steps + background check status |
 | `caregiver_resources` | Resource library (handbook, policies, contacts, emergency info) |
 
 ---
@@ -61,6 +67,9 @@ Run: `supabase/migrations/20260524_training_hub.sql`
 | View own onboarding | — | — | ✓ (own only) | ✗ |
 | Create/edit resources | ✓ | ✓ | ✗ | ✗ |
 | View resources | ✓ | ✓ | ✓ | ✗ |
+| View caregiver training tab | ✓ | ✓ | ✓ (own only) | ✗ |
+| Flag/unflag caregiver | ✓ | ✓ | ✗ | ✗ |
+| Set due dates | ✓ | ✓ | ✗ | ✗ |
 
 ---
 
@@ -74,7 +83,12 @@ Run: `supabase/migrations/20260524_training_hub.sql`
 
 ## Assignment Statuses
 
-`assigned` → `in_progress` → `completed` / `overdue` / `waived`
+`not_started` → `in_progress` → `completed` / `overdue`
+
+- **not_started:** Module assigned but not yet started
+- **in_progress:** Caregiver has clicked "Start" or opened the module
+- **completed:** Finished and acknowledged (with completed_at timestamp)
+- **overdue:** Past due date and not completed (automatically detected)
 
 ---
 
@@ -86,18 +100,60 @@ Run: `supabase/migrations/20260524_training_hub.sql`
 
 ## Notifications Integration
 
-When a training module is assigned via `saveAssignModuleModal()`, a notification is automatically created:
+Training notifications are automatically created:
 
+### Training Assigned
 ```js
 createNotification({
     type: 'training_assigned',
     title: 'Training Assigned',
-    message: `You have been assigned: <module title>.`,
+    message: `You have been assigned: <module title> (Due: <date>)`,
     caregiver_id: caregiverId,
-    recipient_role: 'caregiver',
-    priority: 'normal',
-    related_table: 'training_assignments',
-    related_record_id: assignment.id
+    priority: 'normal' | 'high'  // high if due within 2 days
+})
+```
+
+### Due Date Updated
+```js
+createNotification({
+    type: 'training_due_date_updated',
+    title: 'Training Due Date Updated',
+    message: `The due date has been updated to <date>. Reason: <reason>`,
+    caregiver_id: caregiverId,
+    priority: 'normal' | 'high'
+})
+```
+
+### Training Completed
+```js
+createNotification({
+    type: 'training_completed',
+    title: 'Training Completed',
+    message: `<Caregiver> completed "<module title>"`,
+    recipient_role: 'admin_owner',
+    priority: 'normal'
+})
+```
+
+### Caregiver Flagged
+```js
+createNotification({
+    type: 'caregiver_flagged',
+    title: 'Caregiver Flagged',
+    message: `<Caregiver> has been flagged: <reason>`,
+    recipient_role: 'admin_owner',
+    priority: 'high'
+})
+```
+
+### Onboarding Step Completed
+```js
+createNotification({
+    type: 'onboarding_step_completed',
+    title: 'Onboarding Step Completed',
+    message: `<Caregiver> completed: <step title>`,
+    recipient_role: 'admin_owner',
+    priority: 'normal'
 })
 ```
 
@@ -105,26 +161,72 @@ createNotification({
 
 ## API Reference (`database.js`)
 
+### Training Modules
 ```js
-// Modules
 getTrainingModules({ activeOnly })
 createTrainingModule(mod)
 updateTrainingModule(id, updates)
 deleteTrainingModule(id)
+getTrainingModuleById(id)
+```
 
-// Assignments
-getTrainingAssignments({ caregiverId, moduleId, status })
-assignTrainingModule({ moduleId, caregiverId, assignedBy, dueDate, notes })
-updateTrainingAssignment(id, updates)
-markTrainingComplete(id)
-acknowledgeTraining(id)
+### Training Assignments
+```js
+getTrainingAssignments({ caregiverId, moduleId, status, dueBefore, overdue })
+assignTrainingModule({ moduleId, caregiverId, assignedBy, dueDate, notes, sendNotification })
+updateTrainingAssignment(id, updates, { sendNotification, reason })
+markTrainingComplete(id, { completedBy, score })
+acknowledgeTraining(id, { completedBy })
+getTrainingAssignmentById(id)
+updateTrainingStatusToInProgress(id)
+```
 
-// Onboarding
+### Onboarding Steps
+```js
+getOnboardingSteps({ activeOnly, category })
+createOnboardingStep(step)
+updateOnboardingStep(id, updates)
+deleteOnboardingStep(id)
+getOnboardingStepById(id)
+```
+
+### Onboarding Progress
+```js
+getOnboardingProgress(caregiverId)
+updateOnboardingProgress(caregiverId, stepId, updates, { sendNotification })
+getAllOnboardingProgress()
+```
+
+### Caregiver Management
+```js
+flagCaregiver(caregiverId, { reason, adminNotes, notify })
+unflagCaregiver(caregiverId)
+```
+
+### Statistics & Dashboard
+```js
+getCaregiverTrainingStats(caregiverId)           // Individual stats
+getAllCaregiversTrainingStats()                  // All caregivers' stats
+getOverdueTrainingAssignments()                    // All overdue assignments
+getTrainingApproachingDue(days)                  // Due within X days
+```
+
+### Utility Functions
+```js
+_formatDueDate(dateString)     // "Due in 3 days", "Overdue by 2 days"
+_isUrgentDue(dateString)       // true if due within 2 days
+_isOverdue(dateString)         // true if past due
+```
+
+### Legacy (Onboarding Checklist)
+```js
 getOnboardingChecklist(caregiverId)
 upsertOnboardingChecklist(caregiverId, updates)
 getAllOnboardingChecklists()
+```
 
-// Resources
+### Resources
+```js
 getCaregiverResources({ category, activeOnly })
 createCaregiverResource(resource)
 updateCaregiverResource(id, updates)

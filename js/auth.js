@@ -25,7 +25,7 @@ const AUTH_KEY = 'carehub_session';
  * @returns {boolean}
  */
 function isAuthenticated() {
-    const raw = localStorage.getItem(AUTH_KEY);
+    const raw = sessionStorage.getItem(AUTH_KEY);
     if (!raw) return false;
     try {
         const parsed = JSON.parse(raw);
@@ -75,7 +75,7 @@ async function login(email, password) {
             client_id:    match.client_id    || null,
             timestamp:    Date.now()
         };
-        localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
         return { success: true };
     }
 
@@ -90,7 +90,7 @@ async function login(email, password) {
             client_id:    null,
             timestamp:    Date.now()
         };
-        localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
         return { success: true };
     }
 
@@ -106,13 +106,13 @@ async function logout() {
         await window.SupabaseAuth.signOut();
         return; // signOut handles redirect
     }
-    localStorage.removeItem(AUTH_KEY);
+    sessionStorage.removeItem(AUTH_KEY);
     window.location.href = 'login.html';
 }
 
 /**
  * Redirect to login.html if not authenticated.
- * Synchronous check against localStorage (sufficient for route-guarding).
+ * Synchronous check against sessionStorage (sufficient for route-guarding).
  * For real-auth mode, hydrateSession() should run on app init to keep the
  * local session fresh from the live Supabase Auth token.
  * @returns {boolean}
@@ -146,7 +146,7 @@ async function initAuth() {
 function getSession() {
     if (!isAuthenticated()) return null;
     try {
-        return JSON.parse(localStorage.getItem(AUTH_KEY));
+        return JSON.parse(sessionStorage.getItem(AUTH_KEY));
     } catch (e) {
         return null;
     }
@@ -159,7 +159,7 @@ function updateActivity() {
     const session = getSession();
     if (session) {
         session.timestamp = Date.now();
-        localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
     }
 }
 
@@ -263,7 +263,7 @@ async function resolveUserIds() {
                 .single();
             if (!error && data) {
                 session.caregiver_id = data.id;
-                localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+                sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
                 if (window.DEBUG) console.log('[Auth] Resolved caregiver_id:', data.id);
             } else if (window.DEBUG) {
                 console.warn('[Auth] Could not resolve caregiver_id for', email, error?.message);
@@ -281,7 +281,7 @@ async function resolveUserIds() {
                 .single();
             if (!error && data) {
                 session.client_id = data.id;
-                localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+                sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
                 if (window.DEBUG) console.log('[Auth] Resolved client_id:', data.id);
             } else if (window.DEBUG) {
                 console.warn('[Auth] Could not resolve client_id for', email, error?.message);
@@ -312,7 +312,7 @@ async function resolveUserIds() {
  * @param {Object} ids - { caregiver_id?: string|null, client_id?: string|null }
  */
 function seedDemoIds(ids = {}) {
-    const raw = localStorage.getItem(AUTH_KEY);
+    const raw = sessionStorage.getItem(AUTH_KEY);
     if (!raw) {
         console.warn('[seedDemoIds] No active session. Log in first.');
         return;
@@ -321,7 +321,7 @@ function seedDemoIds(ids = {}) {
         const session = JSON.parse(raw);
         if ('caregiver_id' in ids) session.caregiver_id = ids.caregiver_id;
         if ('client_id' in ids) session.client_id = ids.client_id;
-        localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(session));
         console.log('[seedDemoIds] Session updated:', session);
         console.log('[seedDemoIds] Call navigateTo("dashboard") or reload to apply.');
     } catch (e) {

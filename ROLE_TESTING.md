@@ -181,7 +181,7 @@ If a role sees something it shouldn't, or can't see something it should:
 ## Technical Notes
 
 - All demo accounts use password: `demo123`
-- Sessions are stored in `localStorage` with key `carehub_session`
+- Sessions are stored in `sessionStorage` with key `carehub_session` (cleared when tab is closed)
 - Role is normalized from legacy names (admin→admin_owner, manager→co_owner, etc.)
 - Unauthorized pages redirect to dashboard automatically
 - Navigation items are hidden (not just disabled) for unauthorized roles

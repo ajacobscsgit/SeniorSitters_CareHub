@@ -30,11 +30,17 @@ window.TABLES = {
   TIMESHEETS: "timesheets",
   VISIT_UPDATES: "visit_updates",
   PAYROLL_EXPORTS: "payroll_exports",
+  PAYROLL_EXPORT_ITEMS: "payroll_export_items",
+  VISIT_CLOCK_EVENTS: "visit_clock_events",
   CLIENT_SCHEDULE_PREFERENCES: "client_schedule_preferences",
   CAREGIVER_AVAILABILITY: "caregiver_availability",
   CAREGIVER_UNAVAILABLE_DATES: "caregiver_unavailable_dates",
+  CAREGIVER_TIME_OFF_REQUESTS: "caregiver_time_off_requests",
+  CLIENT_CAREGIVER_ASSIGNMENTS: "client_caregiver_assignments",
   TRAINING_MODULES: "training_modules",
-  TRAINING_ASSIGNMENTS: "training_assignments",
+  CAREGIVER_TRAINING_ASSIGNMENTS: "caregiver_training_assignments",
+  ONBOARDING_STEPS: "onboarding_steps",
+  CAREGIVER_ONBOARDING_PROGRESS: "caregiver_onboarding_progress",
   ONBOARDING_CHECKLIST: "onboarding_checklist",
   CAREGIVER_RESOURCES: "caregiver_resources"
 };

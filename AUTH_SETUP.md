@@ -17,16 +17,16 @@ window.DEV_MODE = false;  // Production: only real Supabase Auth accepted
 ```
 login.html
   └─ login() in auth.js
-       ├─ DEV_MODE = true  → DEMO_USERS lookup (localStorage session)
+       ├─ DEV_MODE = true  → DEMO_USERS lookup (sessionStorage session)
        └─ DEV_MODE = false → SupabaseAuth.signIn() (supabase-auth.js)
                                   └─ supabase.auth.signInWithPassword()
                                   └─ fetch profile from `profiles` table
-                                  └─ write carehub_session to localStorage
+                                  └─ write carehub_session to sessionStorage
 
 index.html (on load)
   └─ initAuth() → SupabaseAuth.hydrateSession()
        └─ reads live Supabase Auth token
-       └─ re-fetches profile and refreshes localStorage session
+       └─ re-fetches profile and refreshes sessionStorage session
 ```
 
 ---
@@ -194,7 +194,7 @@ The demo login buttons will be hidden automatically.
 
 ---
 
-## Session Format (localStorage `carehub_session`)
+## Session Format (sessionStorage `carehub_session`)
 
 ```json
 {

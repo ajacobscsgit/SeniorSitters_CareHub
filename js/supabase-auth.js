@@ -141,7 +141,7 @@
     async function signOut() {
         const db = _db();
         if (db) await db.auth.signOut();
-        localStorage.removeItem('carehub_session');
+        sessionStorage.removeItem('carehub_session');
         window.location.href = 'login.html';
     }
 
@@ -151,7 +151,7 @@
 
     /**
      * Returns true if there is an active Supabase Auth session AND a valid
-     * carehub_session in localStorage.
+     * carehub_session in sessionStorage.
      * @returns {Promise<boolean>}
      */
     async function checkSession() {
@@ -161,8 +161,8 @@
         const { data } = await db.auth.getSession();
         if (!data?.session) return false;
 
-        // Cross-check with localStorage session
-        const raw = localStorage.getItem('carehub_session');
+        // Cross-check with sessionStorage session
+        const raw = sessionStorage.getItem('carehub_session');
         if (!raw) return false;
 
         try {
@@ -176,7 +176,7 @@
     /**
      * Hydrate the local session from the active Supabase Auth session.
      * Call this on app init to handle page-reload scenarios where
-     * localStorage session may be stale.
+     * sessionStorage session may be stale.
      * @returns {Promise<void>}
      */
     async function hydrateSession() {
@@ -505,7 +505,7 @@
     // =========================================================================
 
     /**
-     * Write a CareHub-format session object to localStorage.
+     * Write a CareHub-format session object to sessionStorage.
      * @param {Object} session
      */
     function _storeSession(session) {
@@ -513,7 +513,7 @@
             ...session,
             timestamp: Date.now()
         };
-        localStorage.setItem('carehub_session', JSON.stringify(payload));
+        sessionStorage.setItem('carehub_session', JSON.stringify(payload));
     }
 
     /**

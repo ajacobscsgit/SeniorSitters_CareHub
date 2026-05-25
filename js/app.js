@@ -3789,7 +3789,51 @@ function renderCareRequestDetails(req) {
     `;
 }
 
+let _caregiverProfileTab = 'overview'; // 'overview' | 'training' | 'onboarding' | 'schedule' | 'availability' | 'timeoff' | 'documents' | 'notes'
+
 function renderCaregiverDetails(cg) {
+    const modalRole = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
+    const isAdmin = modalRole === 'admin_owner' || modalRole === 'co_owner';
+
+    // Load training tabs asynchronously
+    setTimeout(() => _loadCaregiverProfileTab(cg.id, isAdmin), 0);
+
+    return `
+        <div class="caregiver-profile-tabs" style="display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid #e5e7eb;padding-bottom:8px;flex-wrap:wrap;">
+            <button class="tab-btn ${_caregiverProfileTab==='overview'?'active':''}" onclick="switchCaregiverProfileTab('overview','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-user"></i> Overview
+            </button>
+            <button class="tab-btn ${_caregiverProfileTab==='training'?'active':''}" onclick="switchCaregiverProfileTab('training','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-graduation-cap"></i> Training
+            </button>
+            <button class="tab-btn ${_caregiverProfileTab==='onboarding'?'active':''}" onclick="switchCaregiverProfileTab('onboarding','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-clipboard-text"></i> Onboarding
+            </button>
+            <button class="tab-btn ${_caregiverProfileTab==='schedule'?'active':''}" onclick="switchCaregiverProfileTab('schedule','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-calendar-check"></i> Schedule
+            </button>
+            <button class="tab-btn ${_caregiverProfileTab==='availability'?'active':''}" onclick="switchCaregiverProfileTab('availability','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-clock"></i> Availability
+            </button>
+            <button class="tab-btn ${_caregiverProfileTab==='timeoff'?'active':''}" onclick="switchCaregiverProfileTab('timeoff','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-airplane-tilt"></i> Time-Off
+            </button>
+            ${isAdmin ? `
+            <button class="tab-btn ${_caregiverProfileTab==='documents'?'active':''}" onclick="switchCaregiverProfileTab('documents','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-files"></i> Documents
+            </button>
+            <button class="tab-btn ${_caregiverProfileTab==='notes'?'active':''}" onclick="switchCaregiverProfileTab('notes','${cg.id}')" style="padding:6px 12px;font-size:12px;">
+                <i class="ph ph-notebook"></i> Notes
+            </button>` : ''}
+        </div>
+
+        <div id="caregiver-profile-content">
+            ${_renderCaregiverOverviewTab(cg)}
+        </div>
+    `;
+}
+
+function _renderCaregiverOverviewTab(cg) {
     return `
         <div class="detail-section">
             <h4>Personal Information</h4>
@@ -3850,7 +3894,7 @@ function renderCaregiverDetails(cg) {
         </div>
 
         <div class="detail-section">
-            <h4>Onboarding Checklist</h4>
+            <h4>Status Summary</h4>
             <div class="detail-grid">
                 <div class="detail-item">
                     <div class="detail-label">Caregiver Status</div>
@@ -3865,38 +3909,576 @@ function renderCaregiverDetails(cg) {
                     <div class="detail-value">${renderStatusBadge(cg.training_status || 'pending')}</div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">Documents</div>
-                    <div class="detail-value">${renderStatusBadge(cg.documents_status || 'pending')}</div>
-                </div>
-                <div class="detail-item">
-                    <div class="detail-label">Welcome Package</div>
-                    <div class="detail-value">${renderStatusBadge(cg.welcome_package_status || 'not_sent')}</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="detail-section">
-            <h4>Portal Account</h4>
-            <div class="detail-grid">
-                <div class="detail-item">
-                    <div class="detail-label">Account Status</div>
+                    <div class="detail-label">Account</div>
                     <div class="detail-value">${renderStatusBadge(cg.account_status || 'approved_no_invite')}</div>
                 </div>
-                ${cg.account_status === 'active' ? `
-                <div class="detail-item">
-                    <div class="detail-label">Portal Access</div>
-                    <div class="detail-value" style="color:var(--success,#16a34a);font-weight:600;">Active</div>
-                </div>` : ''}
             </div>
         </div>
-
-        ${cg.notes ? `
-        <div class="detail-section">
-            <h4>Admin Notes</h4>
-            <p style="white-space: pre-wrap; background: var(--warm-bg); padding: var(--spacing-md); border-radius: var(--radius-md);">${escapeHtml(cg.notes)}</p>
-        </div>
-        ` : ''}
     `;
+}
+
+async function switchCaregiverProfileTab(tab, caregiverId) {
+    _caregiverProfileTab = tab;
+    const modalRole = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
+    const isAdmin = modalRole === 'admin_owner' || modalRole === 'co_owner';
+
+    // Update tab buttons
+    document.querySelectorAll('.caregiver-profile-tabs .tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (btn.textContent.toLowerCase().includes(tab === 'overview' ? 'overview' : tab === 'training' ? 'training' : tab === 'onboarding' ? 'onboard' : tab === 'documents' ? 'documents' : 'notes')) {
+            btn.classList.add('active');
+        }
+    });
+
+    await _loadCaregiverProfileTab(caregiverId, isAdmin);
+}
+
+async function _loadCaregiverProfileTab(caregiverId, isAdmin) {
+    const container = document.getElementById('caregiver-profile-content');
+    if (!container) return;
+
+    const caregiver = await getCaregiverById(caregiverId);
+    if (!caregiver) return;
+
+    container.innerHTML = '<div class="loading-state"><div class="spinner" style="width:24px;height:24px;"></div><p>Loading...</p></div>';
+
+    switch (_caregiverProfileTab) {
+        case 'overview':
+            container.innerHTML = _renderCaregiverOverviewTab(caregiver);
+            break;
+        case 'training':
+            container.innerHTML = await _renderCaregiverTrainingTab(caregiver, isAdmin);
+            break;
+        case 'onboarding':
+            container.innerHTML = await _renderCaregiverOnboardingTab(caregiver, isAdmin);
+            break;
+        case 'schedule':
+            container.innerHTML = await _renderCaregiverScheduleTab(caregiver, isAdmin);
+            break;
+        case 'availability':
+            container.innerHTML = await _renderCaregiverAvailabilityTab(caregiver, isAdmin);
+            break;
+        case 'timeoff':
+            container.innerHTML = await _renderCaregiverTimeOffTab(caregiver, isAdmin);
+            break;
+        case 'documents':
+            container.innerHTML = _renderCaregiverDocumentsTab(caregiver, isAdmin);
+            break;
+        case 'notes':
+            container.innerHTML = _renderCaregiverNotesTab(caregiver, isAdmin);
+            break;
+    }
+}
+
+async function _renderCaregiverTrainingTab(caregiver, isAdmin) {
+    const [assignments, stats] = await Promise.all([
+        getTrainingAssignments({ caregiverId: caregiver.id }),
+        getCaregiverTrainingStats(caregiver.id)
+    ]);
+
+    const STATUS_COLOR = { not_started:'#9ca3af', in_progress:'#3b82f6', completed:'#16a34a', overdue:'#dc2626' };
+    const STATUS_LABEL = { not_started:'Not Started', in_progress:'In Progress', completed:'Completed', overdue:'Overdue' };
+
+    const trainingPercentage = stats?.training?.percentage || 0;
+    const overdueCount = stats?.training?.overdue || 0;
+
+    let html = `
+        <div class="detail-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <h4 style="margin:0;"><i class="ph ph-graduation-cap"></i> Training Progress</h4>
+                ${isAdmin ? `<button class="btn btn-sm btn-primary" onclick="openAssignModuleToCaregiverModal('${caregiver.id}')"><i class="ph ph-plus"></i> Assign Training</button>` : ''}
+            </div>
+
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px,1fr));gap:12px;margin-bottom:20px;">
+                <div style="background:#f9fafb;padding:12px;border-radius:8px;text-align:center;">
+                    <div style="font-size:24px;font-weight:700;color:#374151;">${trainingPercentage}%</div>
+                    <div style="font-size:12px;color:#6b7280;">Complete</div>
+                </div>
+                <div style="background:#f9fafb;padding:12px;border-radius:8px;text-align:center;">
+                    <div style="font-size:24px;font-weight:700;color:#374151;">${stats?.training?.completed || 0}/${stats?.training?.total || 0}</div>
+                    <div style="font-size:12px;color:#6b7280;">Modules Done</div>
+                </div>
+                <div style="background:${overdueCount > 0 ? '#fef2f2' : '#f9fafb'};padding:12px;border-radius:8px;text-align:center;">
+                    <div style="font-size:24px;font-weight:700;color:${overdueCount > 0 ? '#dc2626' : '#374151'};">${overdueCount}</div>
+                    <div style="font-size:12px;color:${overdueCount > 0 ? '#dc2626' : '#6b7280'};">Overdue</div>
+                </div>
+                ${stats?.training?.nextDue ? `
+                <div style="background:#fef9c3;padding:12px;border-radius:8px;text-align:center;">
+                    <div style="font-size:12px;color:#92400e;font-weight:600;">${_formatDueDate(stats.training.nextDue)}</div>
+                    <div style="font-size:11px;color:#a16207;">${stats.training.nextDueModule || 'Next Due'}</div>
+                </div>` : ''}
+            </div>
+
+            <h5 style="margin:16px 0 12px;font-size:14px;font-weight:600;">Assigned Modules</h5>
+    `;
+
+    if (assignments.length === 0) {
+        html += `<div class="empty-state" style="padding:24px;"><p style="color:#6b7280;">No training modules assigned yet.</p></div>`;
+    } else {
+        html += `<div style="display:flex;flex-direction:column;gap:8px;">`;
+        for (const a of assignments) {
+            const isOverdue = a.due_date && new Date(a.due_date) < new Date() && a.status !== 'completed';
+            const dueText = a.due_date ? _formatDueDate(a.due_date) : 'No due date';
+
+            html += `
+                <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;background:${isOverdue ? '#fef2f2' : '#fff'};">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+                        <div style="flex:1;">
+                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                <strong style="font-size:14px;">${escapeHtml(a.training_modules?.title || 'Training Module')}</strong>
+                                <span class="th-badge" style="background:${STATUS_COLOR[a.status] || '#9ca3af'};color:#fff;font-size:11px;padding:2px 8px;border-radius:12px;">${STATUS_LABEL[a.status] || a.status}</span>
+                                ${isOverdue ? `<span style="color:#dc2626;font-size:11px;font-weight:600;"><i class="ph ph-warning"></i> OVERDUE</span>` : ''}
+                            </div>
+                            ${a.training_modules?.description ? `<div style="font-size:12px;color:#6b7280;margin-top:4px;">${escapeHtml(a.training_modules.description)}</div>` : ''}
+                            <div style="font-size:11px;color:#9ca3af;margin-top:6px;">
+                                <i class="ph ph-clock"></i> ${dueText}
+                                ${a.completed_at ? `• Completed ${new Date(a.completed_at).toLocaleDateString()}` : ''}
+                                ${a.score ? `• Score: ${a.score}%` : ''}
+                            </div>
+                        </div>
+                        <div style="display:flex;gap:6px;flex-shrink:0;">
+                            ${isAdmin ? `
+                                <button class="btn btn-sm btn-secondary" onclick="openEditTrainingAssignmentModal('${a.id}')" title="Edit due date, status, etc."><i class="ph ph-pencil"></i></button>
+                                ${a.status !== 'completed' ? `<button class="btn btn-sm btn-success" onclick="adminMarkTrainingComplete('${a.id}', '${caregiver.id}')" title="Mark as complete"><i class="ph ph-check"></i></button>` : ''}
+                            ` : a.status !== 'completed' ? `
+                                <button class="btn btn-sm btn-primary" onclick="startTrainingModule('${a.id}', '${caregiver.id}')">${a.training_modules?.type === 'acknowledgement' ? 'Acknowledge' : 'Start'}</button>
+                            ` : `<span style="color:#16a34a;font-size:12px;"><i class="ph ph-check-circle"></i> Done</span>`}
+                        </div>
+                    </div>
+                    ${a.notes ? `<div style="font-size:11px;color:#6b7280;margin-top:8px;padding-top:8px;border-top:1px solid #f3f4f6;"><i class="ph ph-note"></i> ${escapeHtml(a.notes)}</div>` : ''}
+                </div>
+            `;
+        }
+        html += `</div>`;
+    }
+
+    html += `</div>`;
+    return html;
+}
+
+async function _renderCaregiverOnboardingTab(caregiver, isAdmin) {
+    const [progress, steps] = await Promise.all([
+        getOnboardingProgress(caregiver.id),
+        getOnboardingSteps({ activeOnly: true })
+    ]);
+
+    const stats = await getCaregiverTrainingStats(caregiver.id);
+    const onboardingPercentage = stats?.onboarding?.percentage || 0;
+    const isFlagged = stats?.onboarding?.flagged || false;
+
+    const progressMap = {};
+    progress.forEach(p => progressMap[p.onboarding_step_id] = p);
+
+    let html = `
+        <div class="detail-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <h4 style="margin:0;"><i class="ph ph-clipboard-text"></i> Onboarding Progress</h4>
+                <div style="display:flex;gap:8px;">
+                    ${isFlagged ? `<span style="background:#fef2f2;color:#dc2626;padding:4px 12px;border-radius:16px;font-size:12px;font-weight:600;"><i class="ph ph-flag"></i> FLAGGED</span>` : ''}
+                    ${isAdmin ? `<button class="btn btn-sm btn-secondary" onclick="openOnboardingEditModal('${caregiver.id}')"><i class="ph ph-pencil"></i> Edit Checklist</button>` : ''}
+                </div>
+            </div>
+
+            <div style="background:#f3f4f6;height:8px;border-radius:4px;margin-bottom:16px;overflow:hidden;">
+                <div style="background:${onboardingPercentage === 100 ? '#16a34a' : isFlagged ? '#dc2626' : '#3b82f6'};height:100%;width:${onboardingPercentage}%;transition:width 0.3s;"></div>
+            </div>
+            <div style="text-align:center;font-size:14px;font-weight:600;color:#374151;margin-bottom:20px;">${onboardingPercentage}% Complete</div>
+
+            <div style="display:flex;flex-direction:column;gap:8px;">
+    `;
+
+    for (const step of steps) {
+        const p = progressMap[step.id] || { status: 'not_started' };
+        const isDone = p.status === 'completed';
+        const isFlaggedStep = p.status === 'flagged';
+
+        html += `
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid ${isFlaggedStep ? '#fecaca' : isDone ? '#86efac' : '#e5e7eb'};border-radius:8px;background:${isFlaggedStep ? '#fef2f2' : isDone ? '#f0fdf4' : '#fff'};">
+                <div style="flex-shrink:0;">
+                    ${isDone ? `<i class="ph ph-check-circle" style="color:#16a34a;font-size:20px;"></i>` : isFlaggedStep ? `<i class="ph ph-warning-circle" style="color:#dc2626;font-size:20px;"></i>` : `<i class="ph ph-circle" style="color:#d1d5db;font-size:20px;"></i>`}
+                </div>
+                <div style="flex:1;">
+                    <div style="font-weight:500;font-size:14px;">${escapeHtml(step.title)}</div>
+                    ${step.description ? `<div style="font-size:12px;color:#6b7280;">${escapeHtml(step.description)}</div>` : ''}
+                    ${p.flagged_reason ? `<div style="font-size:11px;color:#dc2626;margin-top:4px;"><i class="ph ph-warning"></i> ${escapeHtml(p.flagged_reason)}</div>` : ''}
+                    ${p.admin_notes ? `<div style="font-size:11px;color:#6b7280;margin-top:4px;"><i class="ph ph-note"></i> ${escapeHtml(p.admin_notes)}</div>` : ''}
+                </div>
+                <div style="flex-shrink:0;text-align:right;">
+                    ${isAdmin ? `
+                        <select onchange="updateOnboardingStepStatus('${caregiver.id}', '${step.id}', this.value)" style="font-size:12px;padding:4px 8px;border-radius:4px;border:1px solid #d1d5db;">
+                            <option value="not_started" ${p.status === 'not_started' ? 'selected' : ''}>Not Started</option>
+                            <option value="in_progress" ${p.status === 'in_progress' ? 'selected' : ''}>In Progress</option>
+                            <option value="completed" ${p.status === 'completed' ? 'selected' : ''}>Completed</option>
+                            <option value="flagged" ${p.status === 'flagged' ? 'selected' : ''}>Flagged</option>
+                        </select>
+                    ` : `<span style="font-size:12px;color:${isDone ? '#16a34a' : isFlaggedStep ? '#dc2626' : '#6b7280'};">${isDone ? 'Completed' : isFlaggedStep ? 'Flagged' : 'Pending'}</span>`}
+                </div>
+            </div>
+        `;
+    }
+
+    html += `</div>`;
+
+    // Admin flag/unflag buttons
+    if (isAdmin) {
+        html += `
+            <div style="margin-top:20px;padding-top:16px;border-top:1px solid #e5e7eb;display:flex;gap:8px;">
+                ${isFlagged ?
+                    `<button class="btn btn-sm btn-secondary" onclick="unflagCaregiverFromProfile('${caregiver.id}')"><i class="ph ph-flag"></i> Remove Flag</button>` :
+                    `<button class="btn btn-sm btn-danger" onclick="openFlagCaregiverModal('${caregiver.id}')"><i class="ph ph-flag"></i> Flag Caregiver</button>`
+                }
+                <button class="btn btn-sm btn-primary" onclick="openSetOnboardingDueDateModal('${caregiver.id}')"><i class="ph ph-calendar"></i> Set Due Date</button>
+            </div>
+        `;
+    }
+
+    html += `</div>`;
+    return html;
+}
+
+function _renderCaregiverDocumentsTab(caregiver, isAdmin) {
+    return `
+        <div class="detail-section">
+            <h4><i class="ph ph-files"></i> Documents</h4>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div style="border:1px dashed #d1d5db;border-radius:8px;padding:24px;text-align:center;">
+                    <i class="ph ph-upload" style="font-size:32px;color:#9ca3af;margin-bottom:8px;"></i>
+                    <p style="color:#6b7280;margin:0;">Document upload feature coming soon</p>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function _renderCaregiverNotesTab(caregiver, isAdmin) {
+    return `
+        <div class="detail-section">
+            <h4><i class="ph ph-notebook"></i> Admin Notes</h4>
+            <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;min-height:120px;">
+                ${caregiver.admin_notes ? `<p style="margin:0;white-space:pre-wrap;">${escapeHtml(caregiver.admin_notes)}</p>` : '<p style="color:#9ca3af;margin:0;font-style:italic;">No notes yet.</p>'}
+            </div>
+            ${isAdmin ? `
+            <div style="margin-top:12px;">
+                <textarea id="caregiver-admin-notes" class="form-control" rows="3" placeholder="Add a note...">${escapeHtml(caregiver.admin_notes || '')}</textarea>
+                <button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="saveCaregiverNotes('${caregiver.id}')">Save Notes</button>
+            </div>` : ''}
+        </div>
+    `;
+}
+
+// ── Schedule Tab ───────────────────────────────────────────────────────────
+
+async function _renderCaregiverScheduleTab(caregiver, isAdmin) {
+    const today = new Date().toISOString().split('T')[0];
+    const [schedules, unavailableDates] = await Promise.all([
+        getSchedules({ caregiver_id: caregiver.id, start_date: today }),
+        getCaregiverUnavailableDates(caregiver.id)
+    ]);
+
+    // Get upcoming schedules (next 30 days)
+    const upcoming = schedules
+        .filter(s => s.status !== 'cancelled')
+        .sort((a, b) => new Date(a.date + 'T' + a.start_time) - new Date(b.date + 'T' + b.start_time))
+        .slice(0, 10);
+
+    let html = `
+        <div class="detail-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <h4 style="margin:0;"><i class="ph ph-calendar-check"></i> Work Schedule</h4>
+                ${isAdmin ? `<button class="btn btn-sm btn-primary" onclick="openAddVisitForCaregiverModal('${caregiver.id}')"><i class="ph ph-plus"></i> Add Visit</button>` : ''}
+            </div>
+
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px,1fr));gap:12px;margin-bottom:20px;">
+                <div style="background:#f9fafb;padding:12px;border-radius:8px;text-align:center;">
+                    <div style="font-size:24px;font-weight:700;color:#374151;">${schedules.filter(s => s.status === 'scheduled').length}</div>
+                    <div style="font-size:12px;color:#6b7280;">Scheduled</div>
+                </div>
+                <div style="background:#f0fdf4;padding:12px;border-radius:8px;text-align:center;">
+                    <div style="font-size:24px;font-weight:700;color:#16a34a;">${schedules.filter(s => s.status === 'completed').length}</div>
+                    <div style="font-size:12px;color:#16a34a;">Completed</div>
+                </div>
+                <div style="background:#fef2f2;padding:12px;border-radius:8px;text-align:center;">
+                    <div style="font-size:24px;font-weight:700;color:#dc2626;">${unavailableDates.length}</div>
+                    <div style="font-size:12px;color:#dc2626;">Unavailable</div>
+                </div>
+            </div>
+
+            <h5 style="margin:16px 0 12px;font-size:14px;font-weight:600;">Upcoming Visits</h5>
+    `;
+
+    if (upcoming.length === 0) {
+        html += `<div class="empty-state" style="padding:24px;"><p style="color:#6b7280;">No upcoming visits scheduled.</p></div>`;
+    } else {
+        html += `<div style="display:flex;flex-direction:column;gap:8px;">`;
+        for (const s of upcoming) {
+            const isToday = s.date === today;
+            html += `
+                <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;background:${isToday ? '#f0f9ff' : '#fff'};">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+                        <div style="flex:1;">
+                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                <strong style="font-size:14px;">${formatDate(s.date)}${isToday ? ' <span style="color:#3b82f6;">(Today)</span>' : ''}</strong>
+                                <span class="th-badge" style="background:${s.status === 'scheduled' ? '#dbeafe' : s.status === 'completed' ? '#dcfce7' : '#fee2e2'};color:${s.status === 'scheduled' ? '#1e40af' : s.status === 'completed' ? '#166534' : '#991b1b'};font-size:11px;padding:2px 8px;border-radius:12px;">${s.status}</span>
+                            </div>
+                            <div style="font-size:13px;color:#6b7280;margin-top:4px;">
+                                <i class="ph ph-clock"></i> ${formatTime(s.start_time)} - ${formatTime(s.end_time)}
+                            </div>
+                            ${s.client?.care_for ? `<div style="font-size:12px;color:#374151;margin-top:2px;"><i class="ph ph-user"></i> ${escapeHtml(s.client.care_for)}</div>` : ''}
+                            ${s.location ? `<div style="font-size:12px;color:#6b7280;margin-top:2px;"><i class="ph ph-map-pin"></i> ${escapeHtml(s.location)}</div>` : ''}
+                        </div>
+                        ${isAdmin ? `
+                        <div style="display:flex;gap:6px;flex-shrink:0;">
+                            <button class="btn btn-sm btn-secondary" onclick="viewSchedule('${s.id}')" title="View details"><i class="ph ph-eye"></i></button>
+                        </div>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        html += `</div>`;
+    }
+
+    html += `</div>`;
+    return html;
+}
+
+// ── Availability Tab ───────────────────────────────────────────────────────
+
+async function _renderCaregiverAvailabilityTab(caregiver, isAdmin) {
+    const availability = await getCaregiverAvailability(caregiver.id);
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    let html = `
+        <div class="detail-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <h4 style="margin:0;"><i class="ph ph-clock"></i> Weekly Availability</h4>
+                ${isAdmin ? `<button class="btn btn-sm btn-primary" onclick="openEditAvailabilityModal('${caregiver.id}')"><i class="ph ph-pencil"></i> Edit</button>` : ''}
+            </div>
+    `;
+
+    // Group by day
+    const byDay = {};
+    days.forEach(d => byDay[d] = []);
+    availability.forEach(slot => {
+        if (byDay[slot.day_of_week]) {
+            byDay[slot.day_of_week].push(slot);
+        }
+    });
+
+    for (const day of days) {
+        const slots = byDay[day];
+        html += `
+            <div style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid #f3f4f6;">
+                <div style="width:100px;font-weight:500;font-size:14px;">${day}</div>
+                <div style="flex:1;">
+                    ${slots.length === 0 ?
+                        '<span style="color:#9ca3af;font-size:13px;">Not available</span>' :
+                        slots.map(s => `<span style="background:#dbeafe;color:#1e40af;padding:4px 8px;border-radius:4px;font-size:12px;margin-right:6px;">${s.start_time} - ${s.end_time}${s.service_area ? ` (${escapeHtml(s.service_area)})` : ''}</span>`).join('')
+                    }
+                </div>
+            </div>
+        `;
+    }
+
+    html += `
+            ${isAdmin ? `
+            <div style="margin-top:20px;padding-top:16px;border-top:1px solid #e5e7eb;">
+                <button class="btn btn-sm btn-secondary" onclick="openAddUnavailableDateModal('${caregiver.id}')"><i class="ph ph-calendar-x"></i> Mark Unavailable Date</button>
+            </div>` : ''}
+        </div>
+    `;
+
+    return html;
+}
+
+// ── Time-Off Requests Tab ─────────────────────────────────────────────────
+
+async function _renderCaregiverTimeOffTab(caregiver, isAdmin) {
+    const requests = await getTimeOffRequests({ caregiverId: caregiver.id, limit: 20 });
+
+    const STATUS_COLOR = {
+        pending: { bg: '#fef3c7', color: '#92400e' },
+        approved: { bg: '#dcfce7', color: '#166534' },
+        denied: { bg: '#fee2e2', color: '#991b1b' },
+        cancelled: { bg: '#f3f4f6', color: '#6b7280' }
+    };
+
+    const TYPE_LABEL = {
+        time_off: 'Time Off',
+        unavailable: 'Unavailable',
+        schedule_change: 'Schedule Change',
+        availability_update: 'Availability Update'
+    };
+
+    let html = `
+        <div class="detail-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+                <h4 style="margin:0;"><i class="ph ph-airplane-tilt"></i> Time-Off Requests</h4>
+                ${isAdmin ?
+                    `<button class="btn btn-sm btn-primary" onclick="openCreateTimeOffModal('${caregiver.id}')"><i class="ph ph-plus"></i> Add Request</button>` :
+                    `<button class="btn btn-sm btn-primary" onclick="openCreateTimeOffModal('${caregiver.id}')"><i class="ph ph-plus"></i> New Request</button>`
+                }
+            </div>
+
+            <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+                <div style="background:#f9fafb;padding:8px 16px;border-radius:8px;">
+                    <span style="font-size:12px;color:#6b7280;">Pending:</span>
+                    <span style="font-weight:600;margin-left:4px;">${requests.filter(r => r.status === 'pending').length}</span>
+                </div>
+                <div style="background:#f0fdf4;padding:8px 16px;border-radius:8px;">
+                    <span style="font-size:12px;color:#16a34a;">Approved:</span>
+                    <span style="font-weight:600;color:#16a34a;margin-left:4px;">${requests.filter(r => r.status === 'approved').length}</span>
+                </div>
+            </div>
+    `;
+
+    if (requests.length === 0) {
+        html += `<div class="empty-state" style="padding:24px;"><p style="color:#6b7280;">No time-off requests yet.</p></div>`;
+    } else {
+        html += `<div style="display:flex;flex-direction:column;gap:8px;">`;
+        for (const r of requests) {
+            const colors = STATUS_COLOR[r.status] || STATUS_COLOR.pending;
+            const canCancel = r.status === 'pending' && !isAdmin;
+            const canReview = r.status === 'pending' && isAdmin;
+
+            html += `
+                <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;background:${r.status === 'pending' ? '#fff' : '#fafafa'};">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+                        <div style="flex:1;">
+                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                <strong style="font-size:14px;">${TYPE_LABEL[r.request_type]}</strong>
+                                <span style="background:${colors.bg};color:${colors.color};font-size:11px;padding:2px 8px;border-radius:12px;text-transform:capitalize;">${r.status}</span>
+                            </div>
+                            <div style="font-size:13px;color:#374151;margin-top:4px;">
+                                <i class="ph ph-calendar"></i> ${formatDate(r.start_date)}${r.end_date !== r.start_date ? ` to ${formatDate(r.end_date)}` : ''}
+                                ${r.start_time ? `<span style="margin-left:8px;"><i class="ph ph-clock"></i> ${r.start_time}${r.end_time ? ` - ${r.end_time}` : ''}</span>` : ''}
+                            </div>
+                            ${r.reason ? `<div style="font-size:12px;color:#6b7280;margin-top:4px;"><i class="ph ph-note"></i> ${escapeHtml(r.reason)}</div>` : ''}
+                            ${r.admin_notes ? `<div style="font-size:12px;color:#6b7280;margin-top:4px;font-style:italic;"><i class="ph ph-chat-circle"></i> Admin: ${escapeHtml(r.admin_notes)}</div>` : ''}
+                            <div style="font-size:11px;color:#9ca3af;margin-top:6px;">
+                                Requested ${new Date(r.created_at).toLocaleDateString()}
+                                ${r.reviewed_at ? `• Reviewed ${new Date(r.reviewed_at).toLocaleDateString()}` : ''}
+                            </div>
+                        </div>
+                        <div style="display:flex;gap:6px;flex-shrink:0;">
+                            ${canReview ? `
+                                <button class="btn btn-sm btn-success" onclick="approveTimeOffRequest('${r.id}', '${caregiver.id}')" title="Approve"><i class="ph ph-check"></i></button>
+                                <button class="btn btn-sm btn-danger" onclick="denyTimeOffRequest('${r.id}', '${caregiver.id}')" title="Deny"><i class="ph ph-x"></i></button>
+                            ` : ''}
+                            ${canCancel ? `
+                                <button class="btn btn-sm btn-secondary" onclick="cancelTimeOffRequest('${r.id}', '${caregiver.id}')">Cancel</button>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        html += `</div>`;
+    }
+
+    html += `</div>`;
+    return html;
+}
+
+// ── Caregiver Profile Action Functions ─────────────────────────────────────
+
+async function startTrainingModule(assignmentId, caregiverId) {
+    await updateTrainingStatusToInProgress(assignmentId);
+    const assignment = await getTrainingAssignmentById(assignmentId);
+    if (assignment?.training_modules?.resource_url) {
+        window.open(assignment.training_modules.resource_url, '_blank');
+    }
+    await _loadCaregiverProfileTab(caregiverId, false);
+}
+
+async function adminMarkTrainingComplete(assignmentId, caregiverId) {
+    const ok = await markTrainingComplete(assignmentId);
+    if (ok) {
+        CareHubToast.success('Training marked as complete');
+        await _loadCaregiverProfileTab(caregiverId, true);
+    } else {
+        CareHubToast.error('Failed to update');
+    }
+}
+
+async function updateOnboardingStepStatus(caregiverId, stepId, status) {
+    const ok = await updateOnboardingProgress(caregiverId, stepId, { status }, { sendNotification: true });
+    if (ok) {
+        CareHubToast.success('Status updated');
+        await _loadCaregiverProfileTab(caregiverId, true);
+    } else {
+        CareHubToast.error('Failed to update');
+    }
+}
+
+async function unflagCaregiverFromProfile(caregiverId) {
+    const ok = await unflagCaregiver(caregiverId);
+    if (ok) {
+        CareHubToast.success('Flag removed');
+        await _loadCaregiverProfileTab(caregiverId, true);
+    } else {
+        CareHubToast.error('Failed to update');
+    }
+}
+
+async function saveCaregiverNotes(caregiverId) {
+    const notes = document.getElementById('caregiver-admin-notes')?.value;
+    const ok = await updateCaregiver(caregiverId, { admin_notes: notes });
+    if (ok) {
+        CareHubToast.success('Notes saved');
+    } else {
+        CareHubToast.error('Failed to save notes');
+    }
+}
+
+// ── Time-Off Request Action Functions ───────────────────────────────────────
+
+async function approveTimeOffRequest(requestId, caregiverId) {
+    const notes = await CareHubConfirm.prompt({ title: 'Approve Request', message: 'Add optional admin notes (or leave blank):', confirmText: 'Approve' });
+    if (notes === null) return; // Cancelled
+
+    const ok = await reviewTimeOffRequest(requestId, 'approved', getCurrentUserId(), { adminNotes: notes || null, addToUnavailable: true });
+    if (ok) {
+        CareHubToast.success('Request approved');
+        await _loadCaregiverProfileTab(caregiverId, true);
+    } else {
+        CareHubToast.error('Failed to approve');
+    }
+}
+
+async function denyTimeOffRequest(requestId, caregiverId) {
+    const notes = await CareHubConfirm.prompt({ title: 'Deny Request', message: 'Reason for denial (required):', confirmText: 'Deny', danger: true });
+    if (notes === null) return; // Cancelled
+    if (!notes.trim()) {
+        CareHubToast.error('Please provide a reason');
+        return;
+    }
+
+    const ok = await reviewTimeOffRequest(requestId, 'denied', getCurrentUserId(), { adminNotes: notes, addToUnavailable: false });
+    if (ok) {
+        CareHubToast.success('Request denied');
+        await _loadCaregiverProfileTab(caregiverId, true);
+    } else {
+        CareHubToast.error('Failed to deny');
+    }
+}
+
+async function cancelTimeOffRequest(requestId, caregiverId) {
+    const confirmed = await CareHubConfirm.confirm({ title: 'Cancel Request', message: 'Are you sure you want to cancel this request?', confirmText: 'Cancel Request', danger: true });
+    if (!confirmed) return;
+
+    const ok = await window.cancelTimeOffRequest(requestId, caregiverId);
+    if (ok) {
+        CareHubToast.success('Request cancelled');
+        await _loadCaregiverProfileTab(caregiverId, false);
+    } else {
+        CareHubToast.error('Failed to cancel');
+    }
+}
+
+// Helper to get current user ID
+function getCurrentUserId() {
+    const session = typeof getSession === 'function' ? getSession() : null;
+    return session?.id || session?.user?.id || null;
 }
 
 function renderClientDetails(client) {
@@ -7309,6 +7891,237 @@ async function deleteResourceUI(id) {
     else    { CareHubToast.error('Failed to delete.'); }
 }
 
+// ── Admin Modals: Time-Off & Availability ─────────────────────────────────
+
+async function openCreateTimeOffModal(caregiverId) {
+    const caregiver = await getCaregiverById(caregiverId);
+    modalTitle.textContent = `Request Time-Off - ${caregiver?.name || 'Caregiver'}`;
+    modalBody.innerHTML = `
+        <div class="form-group">
+            <label>Request Type <span style="color:#dc2626;">*</span></label>
+            <select class="form-select" id="tor-type">
+                <option value="time_off">Time Off (Vacation/Personal)</option>
+                <option value="unavailable">Unavailable (No specific reason)</option>
+                <option value="schedule_change">Schedule Change Request</option>
+                <option value="availability_update">Update Availability</option>
+            </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+            <div class="form-group">
+                <label>Start Date <span style="color:#dc2626;">*</span></label>
+                <input type="date" class="form-control" id="tor-start-date" min="${new Date().toISOString().split('T')[0]}">
+            </div>
+            <div class="form-group">
+                <label>End Date <span style="color:#dc2626;">*</span></label>
+                <input type="date" class="form-control" id="tor-end-date" min="${new Date().toISOString().split('T')[0]}">
+            </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+            <div class="form-group">
+                <label>Start Time (optional)</label>
+                <input type="time" class="form-control" id="tor-start-time">
+            </div>
+            <div class="form-group">
+                <label>End Time (optional)</label>
+                <input type="time" class="form-control" id="tor-end-time">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Reason / Notes</label>
+            <textarea class="form-control" id="tor-reason" rows="3" placeholder="Enter reason for request..."></textarea>
+        </div>
+    `;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveTimeOffRequest('${caregiverId}')">Submit Request</button>
+    `;
+    openModal();
+}
+
+async function saveTimeOffRequest(caregiverId) {
+    const requestType = document.getElementById('tor-type')?.value;
+    const startDate = document.getElementById('tor-start-date')?.value;
+    const endDate = document.getElementById('tor-end-date')?.value;
+    const startTime = document.getElementById('tor-start-time')?.value || null;
+    const endTime = document.getElementById('tor-end-time')?.value || null;
+    const reason = document.getElementById('tor-reason')?.value?.trim() || null;
+
+    if (!startDate || !endDate) {
+        CareHubToast.error('Start and end dates are required');
+        return;
+    }
+
+    if (new Date(startDate) > new Date(endDate)) {
+        CareHubToast.error('End date must be on or after start date');
+        return;
+    }
+
+    const ok = await createTimeOffRequest({
+        caregiverId,
+        requestedBy: getCurrentUserId(),
+        startDate,
+        endDate,
+        startTime,
+        endTime,
+        requestType,
+        reason
+    });
+
+    if (ok) {
+        CareHubToast.success('Request submitted successfully');
+        closeModal();
+        // Refresh the time-off tab if currently viewing it
+        if (_caregiverProfileTab === 'timeoff') {
+            await _loadCaregiverProfileTab(caregiverId, true);
+        }
+    } else {
+        CareHubToast.error('Failed to submit request');
+    }
+}
+
+async function openEditAvailabilityModal(caregiverId) {
+    const caregiver = await getCaregiverById(caregiverId);
+    const currentAvailability = await getCaregiverAvailability(caregiverId);
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    // Group current availability by day
+    const byDay = {};
+    days.forEach(d => byDay[d] = []);
+    currentAvailability.forEach(slot => {
+        if (byDay[slot.day_of_week]) {
+            byDay[slot.day_of_week].push(slot);
+        }
+    });
+
+    modalTitle.textContent = `Edit Availability - ${caregiver?.name || 'Caregiver'}`;
+    modalBody.innerHTML = `
+        <p style="font-size:13px;color:#6b7280;margin-bottom:16px;">Set the caregiver's regular weekly availability. Leave empty for days they are not available.</p>
+        ${days.map(day => `
+            <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:12px;">
+                <div style="font-weight:600;margin-bottom:8px;">${day}</div>
+                <div id="avail-slots-${day}">
+                    ${byDay[day].length === 0 ?
+                        `<div class="avail-slot-row" style="display:flex;gap:8px;margin-bottom:8px;">
+                            <input type="time" class="form-control avail-start" style="width:120px;" placeholder="Start">
+                            <input type="time" class="form-control avail-end" style="width:120px;" placeholder="End">
+                            <input type="text" class="form-control avail-area" style="flex:1;" placeholder="Service area (optional)">
+                            <button class="btn btn-sm btn-danger" onclick="this.parentElement.remove()" title="Remove"><i class="ph ph-trash"></i></button>
+                        </div>` :
+                        byDay[day].map(slot => `
+                            <div class="avail-slot-row" style="display:flex;gap:8px;margin-bottom:8px;">
+                                <input type="time" class="form-control avail-start" style="width:120px;" value="${slot.start_time}">
+                                <input type="time" class="form-control avail-end" style="width:120px;" value="${slot.end_time}">
+                                <input type="text" class="form-control avail-area" style="flex:1;" value="${escapeHtml(slot.service_area || '')}" placeholder="Service area (optional)">
+                                <button class="btn btn-sm btn-danger" onclick="this.parentElement.remove()" title="Remove"><i class="ph ph-trash"></i></button>
+                            </div>
+                        `).join('')
+                    }
+                </div>
+                <button class="btn btn-sm btn-secondary" onclick="addAvailabilitySlotRow('${day}')" style="margin-top:4px;"><i class="ph ph-plus"></i> Add Time Slot</button>
+            </div>
+        `).join('')}
+    `;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveAvailabilityEdit('${caregiverId}')">Save Availability</button>
+    `;
+    openModal();
+}
+
+function addAvailabilitySlotRow(day) {
+    const container = document.getElementById(`avail-slots-${day}`);
+    const row = document.createElement('div');
+    row.className = 'avail-slot-row';
+    row.style.cssText = 'display:flex;gap:8px;margin-bottom:8px;';
+    row.innerHTML = `
+        <input type="time" class="form-control avail-start" style="width:120px;" placeholder="Start">
+        <input type="time" class="form-control avail-end" style="width:120px;" placeholder="End">
+        <input type="text" class="form-control avail-area" style="flex:1;" placeholder="Service area (optional)">
+        <button class="btn btn-sm btn-danger" onclick="this.parentElement.remove()" title="Remove"><i class="ph ph-trash"></i></button>
+    `;
+    container.appendChild(row);
+}
+
+async function saveAvailabilityEdit(caregiverId) {
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const slots = [];
+
+    for (const day of days) {
+        const container = document.getElementById(`avail-slots-${day}`);
+        if (!container) continue;
+
+        const rows = container.querySelectorAll('.avail-slot-row');
+        rows.forEach(row => {
+            const start = row.querySelector('.avail-start')?.value;
+            const end = row.querySelector('.avail-end')?.value;
+            const area = row.querySelector('.avail-area')?.value?.trim() || null;
+
+            if (start && end && start < end) {
+                slots.push({
+                    caregiver_id: caregiverId,
+                    day_of_week: day,
+                    start_time: start,
+                    end_time: end,
+                    service_area: area,
+                    status: 'active'
+                });
+            }
+        });
+    }
+
+    const ok = await saveCaregiverAvailability(caregiverId, slots);
+    if (ok) {
+        CareHubToast.success('Availability updated');
+        closeModal();
+        if (_caregiverProfileTab === 'availability') {
+            await _loadCaregiverProfileTab(caregiverId, true);
+        }
+    } else {
+        CareHubToast.error('Failed to save availability');
+    }
+}
+
+async function openAddUnavailableDateModal(caregiverId) {
+    const caregiver = await getCaregiverById(caregiverId);
+    modalTitle.textContent = `Mark Unavailable Date - ${caregiver?.name || 'Caregiver'}`;
+    modalBody.innerHTML = `
+        <div class="form-group">
+            <label>Date <span style="color:#dc2626;">*</span></label>
+            <input type="date" class="form-control" id="unavail-date" min="${new Date().toISOString().split('T')[0]}">
+        </div>
+        <div class="form-group">
+            <label>Reason (optional)</label>
+            <input type="text" class="form-control" id="unavail-reason" placeholder="e.g., Doctor appointment, Personal day">
+        </div>
+    `;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveUnavailableDate('${caregiverId}')">Mark Unavailable</button>
+    `;
+    openModal();
+}
+
+async function saveUnavailableDate(caregiverId) {
+    const date = document.getElementById('unavail-date')?.value;
+    const reason = document.getElementById('unavail-reason')?.value?.trim() || '';
+
+    if (!date) {
+        CareHubToast.error('Date is required');
+        return;
+    }
+
+    const ok = await addCaregiverUnavailableDate(caregiverId, date, reason);
+    if (ok) {
+        CareHubToast.success('Date marked as unavailable');
+        closeModal();
+        if (_caregiverProfileTab === 'availability' || _caregiverProfileTab === 'schedule') {
+            await _loadCaregiverProfileTab(caregiverId, true);
+        }
+    } else {
+        CareHubToast.error('Failed to mark date');
+    }
+}
+
 window.renderTrainingHub = renderTrainingHub;
 window.switchTrainingTab = switchTrainingTab;
 window.openAddTrainingModuleModal = openAddTrainingModuleModal;
@@ -7423,3 +8236,15 @@ window.integratedApproveTimesheet = integratedApproveTimesheet;
 window.integratedCreateVisitUpdate = integratedCreateVisitUpdate;
 window.integratedConvertCareRequest = integratedConvertCareRequest;
 window.integratedConvertApplication = integratedConvertApplication;
+
+// Time-Off & Availability
+window.openCreateTimeOffModal = openCreateTimeOffModal;
+window.saveTimeOffRequest = saveTimeOffRequest;
+window.openEditAvailabilityModal = openEditAvailabilityModal;
+window.addAvailabilitySlotRow = addAvailabilitySlotRow;
+window.saveAvailabilityEdit = saveAvailabilityEdit;
+window.openAddUnavailableDateModal = openAddUnavailableDateModal;
+window.saveUnavailableDate = saveUnavailableDate;
+window.approveTimeOffRequest = approveTimeOffRequest;
+window.denyTimeOffRequest = denyTimeOffRequest;
+window.cancelTimeOffRequest = cancelTimeOffRequest;

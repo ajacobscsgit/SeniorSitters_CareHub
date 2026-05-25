@@ -2329,6 +2329,234 @@ async function removeCaregiverUnavailableDate(caregiverId, date) {
     return true;
 }
 
+// ==================== TIME-OFF REQUESTS ====================
+
+/**
+ * Get time-off requests with optional filtering
+ * @param {Object} filters
+ * @param {string} [filters.caregiverId]
+ * @param {string} [filters.status] - 'pending', 'approved', 'denied', 'cancelled'
+ * @param {string} [filters.requestType] - 'time_off', 'unavailable', 'schedule_change', 'availability_update'
+ * @param {boolean} [filters.pendingOnly]
+ * @param {number} [filters.limit=50]
+ * @returns {Promise<Array>}
+ */
+async function getTimeOffRequests({ caregiverId = null, status = null, requestType = null, pendingOnly = false, limit = 50 } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient
+        .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+        .select('*, caregivers(id, name, email)')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+    if (caregiverId) q = q.eq('caregiver_id', caregiverId);
+    if (status) q = q.eq('status', status);
+    if (requestType) q = q.eq('request_type', requestType);
+    if (pendingOnly) q = q.eq('status', 'pending');
+
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getTimeOffRequests error:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Get count of pending time-off requests (for dashboard alerts)
+ * @returns {Promise<number>}
+ */
+async function getPendingTimeOffCount() {
+    if (!supabaseClient) return 0;
+    const { count, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'pending');
+    if (error) { console.error('[CareHub] getPendingTimeOffCount error:', error.message); return 0; }
+    return count || 0;
+}
+
+/**
+ * Create a new time-off request
+ * @param {Object} request
+ * @param {string} request.caregiverId
+ * @param {string} request.requestedBy - User ID creating the request
+ * @param {string} request.startDate - YYYY-MM-DD
+ * @param {string} request.endDate - YYYY-MM-DD
+ * @param {string} [request.startTime] - HH:MM
+ * @param {string} [request.endTime] - HH:MM
+ * @param {string} request.requestType
+ * @param {string} [request.reason]
+ * @param {boolean} [sendNotification=true]
+ * @returns {Promise<Object|null>}
+ */
+async function createTimeOffRequest({ caregiverId, requestedBy, startDate, endDate, startTime = null, endTime = null, requestType, reason = null }, { sendNotification = true } = {}) {
+    if (!supabaseClient) return null;
+
+    const row = {
+        caregiver_id: caregiverId,
+        requested_by: requestedBy,
+        start_date: startDate,
+        end_date: endDate,
+        start_time: startTime,
+        end_time: endTime,
+        request_type: requestType,
+        reason: reason,
+        status: 'pending',
+        created_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+        .insert([row])
+        .select()
+        .single();
+
+    if (error) { console.error('[CareHub] createTimeOffRequest error:', error.message); return null; }
+
+    // Send notification to admins
+    if (sendNotification && data) {
+        const caregiver = await getCaregiverById(caregiverId);
+        const typeLabel = { time_off: 'Time Off', unavailable: 'Unavailability', schedule_change: 'Schedule Change', availability_update: 'Availability Update' }[requestType] || requestType;
+
+        await createNotification({
+            type: 'time_off_request_submitted',
+            title: `${typeLabel} Request`,
+            message: `${caregiver?.name || 'A caregiver'} requested ${typeLabel.toLowerCase()}: ${startDate}${endDate !== startDate ? ` to ${endDate}` : ''}${reason ? `. Reason: ${reason}` : ''}`,
+            recipient_role: 'admin_owner',
+            priority: 'normal',
+            related_table: TABLES.CAREGIVER_TIME_OFF_REQUESTS,
+            related_record_id: data.id,
+            caregiver_id: caregiverId
+        });
+    }
+
+    return data;
+}
+
+/**
+ * Review (approve/deny) a time-off request
+ * @param {string} requestId
+ * @param {string} status - 'approved' or 'denied'
+ * @param {string} reviewedBy - Admin user ID
+ * @param {string} [adminNotes]
+ * @param {boolean} [addToUnavailable=true] - If approved, add to unavailable_dates
+ * @returns {Promise<boolean>}
+ */
+async function reviewTimeOffRequest(requestId, status, reviewedBy, { adminNotes = null, addToUnavailable = true } = {}) {
+    if (!supabaseClient) return false;
+    if (!['approved', 'denied'].includes(status)) return false;
+
+    const now = new Date().toISOString();
+
+    // Get the request first
+    const { data: request } = await supabaseClient
+        .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+        .select('*')
+        .eq('id', requestId)
+        .single();
+
+    if (!request) return false;
+
+    // Update the request
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+        .update({
+            status,
+            admin_notes: adminNotes,
+            reviewed_by: reviewedBy,
+            reviewed_at: now,
+            updated_at: now
+        })
+        .eq('id', requestId);
+
+    if (error) { console.error('[CareHub] reviewTimeOffRequest error:', error.message); return false; }
+
+    // If approved and it's time_off or unavailable, add to unavailable_dates
+    if (status === 'approved' && addToUnavailable && ['time_off', 'unavailable'].includes(request.request_type)) {
+        // Add each date in the range
+        const start = new Date(request.start_date);
+        const end = new Date(request.end_date);
+
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+            const dateStr = d.toISOString().split('T')[0];
+            await addCaregiverUnavailableDate(request.caregiver_id, dateStr, request.reason);
+        }
+    }
+
+    // Send notification to caregiver
+    const caregiver = await getCaregiverById(request.caregiver_id);
+    const typeLabel = { time_off: 'Time Off', unavailable: 'Unavailability', schedule_change: 'Schedule Change', availability_update: 'Availability Update' }[request.request_type] || request.request_type;
+
+    await createNotification({
+        type: status === 'approved' ? 'time_off_request_approved' : 'time_off_request_denied',
+        title: `${typeLabel} Request ${status === 'approved' ? 'Approved' : 'Denied'}`,
+        message: `Your ${typeLabel.toLowerCase()} request for ${request.start_date}${request.end_date !== request.start_date ? ` to ${request.end_date}` : ''} has been ${status}.${adminNotes ? ` Note: ${adminNotes}` : ''}`,
+        caregiver_id: request.caregiver_id,
+        priority: 'normal',
+        related_table: TABLES.CAREGIVER_TIME_OFF_REQUESTS,
+        related_record_id: requestId
+    });
+
+    return true;
+}
+
+/**
+ * Cancel a pending time-off request (by caregiver)
+ * @param {string} requestId
+ * @param {string} caregiverId - For verification
+ * @returns {Promise<boolean>}
+ */
+async function cancelTimeOffRequest(requestId, caregiverId) {
+    if (!supabaseClient) return false;
+
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+        .update({
+            status: 'cancelled',
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', requestId)
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'pending'); // Only cancel if still pending
+
+    if (error) { console.error('[CareHub] cancelTimeOffRequest error:', error.message); return false; }
+    return true;
+}
+
+/**
+ * Check if caregiver has any approved time-off for a date range
+ * @param {string} caregiverId
+ * @param {string} date - YYYY-MM-DD
+ * @param {string} [startTime] - HH:MM
+ * @param {string} [endTime] - HH:MM
+ * @returns {Promise<Object|null>} - Returns time-off request if found
+ */
+async function checkCaregiverTimeOff(caregiverId, date, startTime = null, endTime = null) {
+    if (!supabaseClient) return null;
+
+    let q = supabaseClient
+        .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+        .select('*')
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'approved')
+        .lte('start_date', date)
+        .gte('end_date', date);
+
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] checkCaregiverTimeOff error:', error.message); return null; }
+
+    if (!data || data.length === 0) return null;
+
+    // If time provided, check for overlap
+    if (startTime && endTime) {
+        const overlapping = data.find(r => {
+            if (!r.start_time || !r.end_time) return true; // Full day off
+            return _timesOverlap(startTime, endTime, r.start_time, r.end_time);
+        });
+        return overlapping || null;
+    }
+
+    return data[0];
+}
+
 // ==================== CONFLICT CHECKING ====================
 
 /**
@@ -2417,6 +2645,17 @@ async function checkScheduleConflicts(proposed) {
         }
     }
 
+    // ── 3b. Caregiver approved time-off ───────────────────────────────────────
+    if (caregiver_id) {
+        const timeOff = await checkCaregiverTimeOff(caregiver_id, date, start_time, end_time);
+        if (timeOff) {
+            conflicts.push({
+                type: 'time_off',
+                message: `Caregiver has approved ${timeOff.request_type === 'time_off' ? 'time off' : 'unavailability'}${timeOff.reason ? ': ' + timeOff.reason : ''}.`
+            });
+        }
+    }
+
     // ── 4. Outside availability window ──────────────────────────────────────
     if (caregiver_id) {
         const dow = _dateToDayOfWeek(date);
@@ -2488,8 +2727,8 @@ async function getAvailableCaregivers(proposed) {
 
     const cgIds = caregivers.map(c => c.id);
 
-    // Parallel fetch: availability, unavailable dates, existing bookings on that date
-    const [availSlots, unavailRows, bookedRows] = await Promise.all([
+    // Parallel fetch: availability, unavailable dates, time-off, existing bookings
+    const [availSlots, unavailRows, timeOffRows, bookedRows] = await Promise.all([
         supabaseClient
             .from(TABLES.CAREGIVER_AVAILABILITY)
             .select('caregiver_id, start_time, end_time, service_area')
@@ -2501,6 +2740,14 @@ async function getAvailableCaregivers(proposed) {
             .select('caregiver_id')
             .in('caregiver_id', cgIds)
             .eq('date', date)
+            .then(r => r.data || []),
+        supabaseClient
+            .from(TABLES.CAREGIVER_TIME_OFF_REQUESTS)
+            .select('caregiver_id, start_time, end_time, request_type, reason')
+            .in('caregiver_id', cgIds)
+            .eq('status', 'approved')
+            .lte('start_date', date)
+            .gte('end_date', date)
             .then(r => r.data || []),
         supabaseClient
             .from(TABLES.SCHEDULES)
@@ -2521,6 +2768,19 @@ async function getAvailableCaregivers(proposed) {
         // Hard block: unavailable date
         if (unavailSet.has(cg.id)) {
             reasons.push({ type: 'block', text: 'Marked unavailable on this date' });
+            results.push({ caregiver: cg, score: -1, reasons, blocked: true });
+            continue;
+        }
+
+        // Hard block: approved time-off
+        const hasTimeOff = timeOffRows
+            .filter(t => t.caregiver_id === cg.id)
+            .some(t => {
+                if (!t.start_time || !t.end_time) return true; // Full day off
+                return _timesOverlap(start_time, end_time, t.start_time, t.end_time);
+            });
+        if (hasTimeOff) {
+            reasons.push({ type: 'block', text: 'Has approved time off' });
             results.push({ caregiver: cg, score: -1, reasons, blocked: true });
             continue;
         }
@@ -2672,57 +2932,466 @@ async function deleteTrainingModule(id) {
     return true;
 }
 
-async function getTrainingAssignments({ caregiverId = null, moduleId = null, status = null } = {}) {
+async function getTrainingAssignments({ caregiverId = null, moduleId = null, status = null, dueBefore = null, overdue = null } = {}) {
     if (!supabaseClient) return [];
     let q = supabaseClient
-        .from(TABLES.TRAINING_ASSIGNMENTS)
+        .from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
         .select('*, training_modules(*), caregivers(id, name, email)')
         .order('assigned_at', { ascending: false });
     if (caregiverId) q = q.eq('caregiver_id', caregiverId);
     if (moduleId)    q = q.eq('module_id', moduleId);
     if (status)      q = q.eq('status', status);
+    if (dueBefore)   q = q.lte('due_date', dueBefore);
+    if (overdue === true) {
+        const now = new Date().toISOString();
+        q = q.lt('due_date', now).neq('status', 'completed');
+    }
     const { data, error } = await q;
     if (error) { console.error('[CareHub] getTrainingAssignments error:', error.message); return []; }
     return data || [];
 }
 
-async function assignTrainingModule({ moduleId, caregiverId, assignedBy = null, dueDate = null, notes = null }) {
+async function assignTrainingModule({ moduleId, caregiverId, assignedBy = null, dueDate = null, notes = null, sendNotification = true }) {
     if (!supabaseClient) return null;
+    const now = new Date().toISOString();
     const { data, error } = await supabaseClient
-        .from(TABLES.TRAINING_ASSIGNMENTS)
+        .from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
         .upsert([{
             module_id: moduleId, caregiver_id: caregiverId,
             assigned_by: assignedBy, due_date: dueDate, notes,
-            status: 'assigned', assigned_at: new Date().toISOString()
+            status: 'not_started', assigned_at: now
         }], { onConflict: 'module_id,caregiver_id' })
         .select().single();
     if (error) { console.error('[CareHub] assignTrainingModule error:', error.message); return null; }
+
+    // Create notification for caregiver
+    if (sendNotification && data) {
+        const module = await getTrainingModuleById(moduleId);
+        await createNotification({
+            type: 'training_assigned',
+            title: 'New Training Assigned',
+            message: `You have been assigned: ${module?.title || 'a new training module'}${dueDate ? ` (Due: ${_formatDueDate(dueDate)})` : ''}`,
+            caregiver_id: caregiverId,
+            priority: dueDate && _isUrgentDue(dueDate) ? 'high' : 'normal',
+            related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
+            related_record_id: data.id
+        });
+    }
+
     return data;
 }
 
-async function updateTrainingAssignment(id, updates) {
+async function updateTrainingAssignment(id, updates, { sendNotification = false, reason = null } = {}) {
     if (!supabaseClient) return false;
-    const { error } = await supabaseClient.from(TABLES.TRAINING_ASSIGNMENTS).update(updates).eq('id', id);
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+        .update({ ...updates, updated_at: new Date().toISOString() })
+        .eq('id', id);
     if (error) { console.error('[CareHub] updateTrainingAssignment error:', error.message); return false; }
+
+    // Send notification if due date updated
+    if (sendNotification && updates.due_date) {
+        const assignment = await getTrainingAssignmentById(id);
+        if (assignment) {
+            await createNotification({
+                type: 'training_due_date_updated',
+                title: 'Training Due Date Updated',
+                message: `The due date for "${assignment.training_modules?.title || 'your training'}" has been updated to ${_formatDueDate(updates.due_date)}${reason ? `. Reason: ${reason}` : ''}`,
+                caregiver_id: assignment.caregiver_id,
+                priority: _isUrgentDue(updates.due_date) ? 'high' : 'normal',
+                related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
+                related_record_id: id
+            });
+        }
+    }
+
     return true;
 }
 
-async function markTrainingComplete(id) {
+async function markTrainingComplete(id, { completedBy = null, score = null } = {}) {
     if (!supabaseClient) return false;
     const now = new Date().toISOString();
-    const { error } = await supabaseClient.from(TABLES.TRAINING_ASSIGNMENTS)
-        .update({ status: 'completed', completed_at: now }).eq('id', id);
+
+    const assignment = await getTrainingAssignmentById(id);
+    if (!assignment) return false;
+
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+        .update({
+            status: 'completed',
+            completed_at: now,
+            completed_by: completedBy,
+            score: score
+        })
+        .eq('id', id);
     if (error) { console.error('[CareHub] markTrainingComplete error:', error.message); return false; }
+
+    // Create notification for admin
+    const session = getSession();
+    const isAdmin = session && (session.role === 'admin_owner' || session.role === 'co_owner');
+    if (!isAdmin) {
+        await createNotification({
+            type: 'training_completed',
+            title: 'Training Completed',
+            message: `${assignment.caregivers?.name || 'A caregiver'} completed "${assignment.training_modules?.title || 'training'}"`,
+            recipient_role: 'admin_owner',
+            priority: 'normal',
+            related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
+            related_record_id: id,
+            caregiver_id: assignment.caregiver_id
+        });
+    }
+
     return true;
 }
 
-async function acknowledgeTraining(id) {
+async function acknowledgeTraining(id, { completedBy = null } = {}) {
     if (!supabaseClient) return false;
     const now = new Date().toISOString();
-    const { error } = await supabaseClient.from(TABLES.TRAINING_ASSIGNMENTS)
-        .update({ acknowledged_at: now, status: 'completed', completed_at: now }).eq('id', id);
+
+    const assignment = await getTrainingAssignmentById(id);
+    if (!assignment) return false;
+
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+        .update({
+            acknowledged_at: now,
+            status: 'completed',
+            completed_at: now,
+            completed_by: completedBy
+        })
+        .eq('id', id);
     if (error) { console.error('[CareHub] acknowledgeTraining error:', error.message); return false; }
+
+    // Create notification for admin
+    const session = getSession();
+    const isAdmin = session && (session.role === 'admin_owner' || session.role === 'co_owner');
+    if (!isAdmin) {
+        await createNotification({
+            type: 'training_acknowledged',
+            title: 'Training Acknowledged',
+            message: `${assignment.caregivers?.name || 'A caregiver'} acknowledged "${assignment.training_modules?.title || 'training'}"`,
+            recipient_role: 'admin_owner',
+            priority: 'normal',
+            related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
+            related_record_id: id,
+            caregiver_id: assignment.caregiver_id
+        });
+    }
+
     return true;
+}
+
+async function getTrainingAssignmentById(id) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+        .select('*, training_modules(*), caregivers(id, name, email)')
+        .eq('id', id)
+        .single();
+    if (error) { console.error('[CareHub] getTrainingAssignmentById error:', error.message); return null; }
+    return data;
+}
+
+async function getTrainingModuleById(id) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.TRAINING_MODULES)
+        .select('*')
+        .eq('id', id)
+        .single();
+    if (error) { console.error('[CareHub] getTrainingModuleById error:', error.message); return null; }
+    return data;
+}
+
+async function updateTrainingStatusToInProgress(id) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+        .update({ status: 'in_progress', started_at: new Date().toISOString() })
+        .eq('id', id);
+    if (error) { console.error('[CareHub] updateTrainingStatusToInProgress error:', error.message); return false; }
+    return true;
+}
+
+// ==================== ONBOARDING STEPS & PROGRESS ====================
+
+async function getOnboardingSteps({ activeOnly = true, category = null } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient
+        .from(TABLES.ONBOARDING_STEPS)
+        .select('*')
+        .order('sort_order', { ascending: true })
+        .order('created_at', { ascending: true });
+    if (activeOnly) q = q.eq('active', true);
+    if (category)   q = q.eq('category', category);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getOnboardingSteps error:', error.message); return []; }
+    return data || [];
+}
+
+async function createOnboardingStep(step) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.ONBOARDING_STEPS)
+        .insert([{ ...step, created_at: new Date().toISOString() }])
+        .select()
+        .single();
+    if (error) { console.error('[CareHub] createOnboardingStep error:', error.message); return null; }
+    return data;
+}
+
+async function updateOnboardingStep(id, updates) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient
+        .from(TABLES.ONBOARDING_STEPS)
+        .update({ ...updates, updated_at: new Date().toISOString() })
+        .eq('id', id);
+    if (error) { console.error('[CareHub] updateOnboardingStep error:', error.message); return false; }
+    return true;
+}
+
+async function deleteOnboardingStep(id) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.ONBOARDING_STEPS).delete().eq('id', id);
+    if (error) { console.error('[CareHub] deleteOnboardingStep error:', error.message); return false; }
+    return true;
+}
+
+async function getOnboardingProgress(caregiverId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_ONBOARDING_PROGRESS)
+        .select('*, onboarding_steps(*)')
+        .eq('caregiver_id', caregiverId)
+        .order('created_at', { ascending: true });
+    if (error) { console.error('[CareHub] getOnboardingProgress error:', error.message); return []; }
+    return data || [];
+}
+
+async function updateOnboardingProgress(caregiverId, stepId, updates, { sendNotification = false } = {}) {
+    if (!supabaseClient) return false;
+    const now = new Date().toISOString();
+    const { data: existing } = await supabaseClient
+        .from(TABLES.CAREGIVER_ONBOARDING_PROGRESS)
+        .select('*')
+        .eq('caregiver_id', caregiverId)
+        .eq('onboarding_step_id', stepId)
+        .maybeSingle();
+
+    const row = {
+        caregiver_id: caregiverId,
+        onboarding_step_id: stepId,
+        ...updates,
+        updated_at: now
+    };
+    if (updates.status === 'completed' && !existing?.completed_at) {
+        row.completed_at = now;
+    }
+
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_ONBOARDING_PROGRESS)
+        .upsert([row], { onConflict: 'caregiver_id,onboarding_step_id' });
+    if (error) { console.error('[CareHub] updateOnboardingProgress error:', error.message); return false; }
+
+    // Send notification if step completed
+    if (sendNotification && updates.status === 'completed') {
+        const step = await getOnboardingStepById(stepId);
+        const caregiver = await getCaregiverById(caregiverId);
+        await createNotification({
+            type: 'onboarding_step_completed',
+            title: 'Onboarding Step Completed',
+            message: `${caregiver?.name || 'Caregiver'} completed: ${step?.title || 'onboarding step'}`,
+            recipient_role: 'admin_owner',
+            priority: 'normal',
+            related_table: TABLES.CAREGIVER_ONBOARDING_PROGRESS,
+            related_record_id: `${caregiverId}-${stepId}`,
+            caregiver_id: caregiverId
+        });
+    }
+
+    return true;
+}
+
+async function getOnboardingStepById(id) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.ONBOARDING_STEPS)
+        .select('*')
+        .eq('id', id)
+        .single();
+    if (error) { console.error('[CareHub] getOnboardingStepById error:', error.message); return null; }
+    return data;
+}
+
+async function getAllOnboardingProgress() {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_ONBOARDING_PROGRESS)
+        .select('*, onboarding_steps(*), caregivers(id, name, email, status)')
+        .order('updated_at', { ascending: false });
+    if (error) { console.error('[CareHub] getAllOnboardingProgress error:', error.message); return []; }
+    return data || [];
+}
+
+async function flagCaregiver(caregiverId, { reason, adminNotes = null, notify = true }) {
+    if (!supabaseClient) return false;
+    const now = new Date().toISOString();
+
+    // Create or update a flagged status entry
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_ONBOARDING_PROGRESS)
+        .upsert([{
+            caregiver_id: caregiverId,
+            status: 'flagged',
+            flagged_reason: reason,
+            admin_notes: adminNotes,
+            updated_at: now
+        }], { onConflict: 'caregiver_id' });
+    if (error) { console.error('[CareHub] flagCaregiver error:', error.message); return false; }
+
+    // Create notification
+    if (notify) {
+        const caregiver = await getCaregiverById(caregiverId);
+        await createNotification({
+            type: 'caregiver_flagged',
+            title: 'Caregiver Flagged',
+            message: `${caregiver?.name || 'A caregiver'} has been flagged: ${reason}`,
+            recipient_role: 'admin_owner',
+            priority: 'high',
+            related_table: TABLES.CAREGIVERS,
+            related_record_id: caregiverId,
+            caregiver_id: caregiverId
+        });
+    }
+
+    return true;
+}
+
+async function unflagCaregiver(caregiverId) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_ONBOARDING_PROGRESS)
+        .update({ status: 'not_started', flagged_reason: null, updated_at: new Date().toISOString() })
+        .eq('caregiver_id', caregiverId);
+    if (error) { console.error('[CareHub] unflagCaregiver error:', error.message); return false; }
+    return true;
+}
+
+// ==================== TRAINING STATISTICS & DASHBOARD ====================
+
+async function getCaregiverTrainingStats(caregiverId) {
+    if (!supabaseClient) return null;
+
+    const [assignments, steps] = await Promise.all([
+        getTrainingAssignments({ caregiverId }),
+        getOnboardingProgress(caregiverId)
+    ]);
+
+    const totalTraining = assignments.length;
+    const completedTraining = assignments.filter(a => a.status === 'completed').length;
+    const overdueTraining = assignments.filter(a => {
+        if (a.status === 'completed') return false;
+        if (!a.due_date) return false;
+        return new Date(a.due_date) < new Date();
+    }).length;
+
+    const totalSteps = steps.length;
+    const completedSteps = steps.filter(s => s.status === 'completed').length;
+    const flagged = steps.some(s => s.status === 'flagged');
+
+    const nextDue = assignments
+        .filter(a => a.status !== 'completed' && a.due_date)
+        .sort((a, b) => new Date(a.due_date) - new Date(b.due_date))[0];
+
+    return {
+        training: {
+            total: totalTraining,
+            completed: completedTraining,
+            overdue: overdueTraining,
+            percentage: totalTraining > 0 ? Math.round((completedTraining / totalTraining) * 100) : 0,
+            nextDue: nextDue?.due_date || null,
+            nextDueModule: nextDue?.training_modules?.title || null
+        },
+        onboarding: {
+            total: totalSteps,
+            completed: completedSteps,
+            percentage: totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0,
+            flagged: flagged
+        }
+    };
+}
+
+async function getAllCaregiversTrainingStats() {
+    if (!supabaseClient) return [];
+
+    const caregivers = await getCaregivers();
+    const stats = await Promise.all(
+        caregivers.map(async (cg) => {
+            const cgStats = await getCaregiverTrainingStats(cg.id);
+            return {
+                caregiver: cg,
+                ...cgStats
+            };
+        })
+    );
+
+    return stats;
+}
+
+async function getOverdueTrainingAssignments() {
+    if (!supabaseClient) return [];
+    const now = new Date().toISOString();
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+        .select('*, training_modules(*), caregivers(id, name, email)')
+        .lt('due_date', now)
+        .neq('status', 'completed')
+        .order('due_date', { ascending: true });
+    if (error) { console.error('[CareHub] getOverdueTrainingAssignments error:', error.message); return []; }
+    return data || [];
+}
+
+async function getTrainingApproachingDue(days = 3) {
+    if (!supabaseClient) return [];
+    const now = new Date();
+    const future = new Date(now);
+    future.setDate(future.getDate() + days);
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+        .select('*, training_modules(*), caregivers(id, name, email)')
+        .gte('due_date', now.toISOString())
+        .lte('due_date', future.toISOString())
+        .neq('status', 'completed')
+        .order('due_date', { ascending: true });
+    if (error) { console.error('[CareHub] getTrainingApproachingDue error:', error.message); return []; }
+    return data || [];
+}
+
+// ==================== UTILITY FUNCTIONS ====================
+
+function _formatDueDate(dateString) {
+    if (!dateString) return 'No due date';
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffDays = Math.ceil((date - now) / (1000 * 60 * 60 * 24));
+
+    if (diffDays < 0) return `Overdue by ${Math.abs(diffDays)} day${Math.abs(diffDays) > 1 ? 's' : ''}`;
+    if (diffDays === 0) return 'Due today';
+    if (diffDays === 1) return 'Due tomorrow';
+    return `Due in ${diffDays} days (${date.toLocaleDateString()})`;
+}
+
+function _isUrgentDue(dateString) {
+    if (!dateString) return false;
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffDays = Math.ceil((date - now) / (1000 * 60 * 60 * 24));
+    return diffDays <= 2 && diffDays >= 0;
+}
+
+function _isOverdue(dateString) {
+    if (!dateString) return false;
+    const date = new Date(dateString);
+    const now = new Date();
+    return date < now;
 }
 
 async function getOnboardingChecklist(caregiverId) {
@@ -2843,6 +3512,13 @@ if (typeof module !== 'undefined' && module.exports) {
         getCaregiverUnavailableDates,
         addCaregiverUnavailableDate,
         removeCaregiverUnavailableDate,
+        // Time-off requests
+        getTimeOffRequests,
+        getPendingTimeOffCount,
+        createTimeOffRequest,
+        reviewTimeOffRequest,
+        cancelTimeOffRequest,
+        checkCaregiverTimeOff,
         checkScheduleConflicts,
         getAvailableCaregivers,
         createRecurringSchedules,
@@ -2855,12 +3531,970 @@ if (typeof module !== 'undefined' && module.exports) {
         updateTrainingAssignment,
         markTrainingComplete,
         acknowledgeTraining,
+        getTrainingAssignmentById,
+        getTrainingModuleById,
+        updateTrainingStatusToInProgress,
         getOnboardingChecklist,
         upsertOnboardingChecklist,
         getAllOnboardingChecklists,
+        getOnboardingSteps,
+        createOnboardingStep,
+        updateOnboardingStep,
+        deleteOnboardingStep,
+        getOnboardingProgress,
+        updateOnboardingProgress,
+        getOnboardingStepById,
+        getAllOnboardingProgress,
+        flagCaregiver,
+        unflagCaregiver,
+        getCaregiverTrainingStats,
+        getAllCaregiversTrainingStats,
+        getOverdueTrainingAssignments,
+        getTrainingApproachingDue,
         getCaregiverResources,
         createCaregiverResource,
         updateCaregiverResource,
-        deleteCaregiverResource
+        deleteCaregiverResource,
+        // Client-Caregiver Assignments
+        getClientCaregiverAssignments,
+        getAssignmentById,
+        createClientCaregiverAssignment,
+        updateClientCaregiverAssignment,
+        endClientCaregiverAssignment,
+        getClientCaregivers,
+        getCaregiverClients,
+        hasActiveAssignment,
+        getActiveAssignment,
+        // Utility functions
+        _formatDueDate,
+        _isUrgentDue,
+        _isOverdue
     };
+}
+
+// ==================== CLIENT-CAREGIVER ASSIGNMENTS ====================
+
+/**
+ * Get client-caregiver assignments with optional filtering
+ * @param {Object} filters
+ * @param {string} [filters.clientId]
+ * @param {string} [filters.caregiverId]
+ * @param {string} [filters.status] - 'active', 'backup', 'ended'
+ * @param {boolean} [filters.activeOnly]
+ * @param {number} [filters.limit=50]
+ * @returns {Promise<Array>}
+ */
+async function getClientCaregiverAssignments({ clientId = null, caregiverId = null, status = null, activeOnly = false, limit = 50 } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient
+        .from(TABLES.CLIENT_CAREGIVER_ASSIGNMENTS)
+        .select('*, clients(id, name, care_for, email, city), caregivers(id, name, email, phone)')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+    if (clientId) q = q.eq('client_id', clientId);
+    if (caregiverId) q = q.eq('caregiver_id', caregiverId);
+    if (status) q = q.eq('status', status);
+    if (activeOnly) q = q.eq('status', 'active');
+
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getClientCaregiverAssignments error:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Get single assignment by ID
+ * @param {string} id
+ * @returns {Promise<Object|null>}
+ */
+async function getAssignmentById(id) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.CLIENT_CAREGIVER_ASSIGNMENTS)
+        .select('*, clients(id, name, care_for, email), caregivers(id, name, email, phone)')
+        .eq('id', id)
+        .single();
+    if (error) { console.error('[CareHub] getAssignmentById error:', error.message); return null; }
+    return data;
+}
+
+/**
+ * Create a new client-caregiver assignment
+ * @param {Object} assignment
+ * @param {string} assignment.clientId
+ * @param {string} assignment.caregiverId
+ * @param {string} [assignment.status='active']
+ * @param {string} [assignment.startDate]
+ * @param {string} [assignment.endDate]
+ * @param {string} [assignment.assignedBy]
+ * @param {string} [assignment.notes]
+ * @param {boolean} [sendNotification=true]
+ * @returns {Promise<Object|null>}
+ */
+async function createClientCaregiverAssignment({ clientId, caregiverId, status = 'active', startDate = null, endDate = null, assignedBy = null, notes = null }, { sendNotification = true } = {}) {
+    if (!supabaseClient) return null;
+
+    const row = {
+        client_id: clientId,
+        caregiver_id: caregiverId,
+        status,
+        start_date: startDate || new Date().toISOString().split('T')[0],
+        end_date: endDate,
+        assigned_by: assignedBy,
+        notes,
+        created_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.CLIENT_CAREGIVER_ASSIGNMENTS)
+        .insert([row])
+        .select()
+        .single();
+
+    if (error) {
+        // Handle unique constraint violation (active assignment already exists)
+        if (error.code === '23505') {
+            console.warn('[CareHub] Active assignment already exists for this client-caregiver pair');
+            return null;
+        }
+        console.error('[CareHub] createClientCaregiverAssignment error:', error.message);
+        return null;
+    }
+
+    // Send notifications
+    if (sendNotification && data) {
+        const [client, caregiver] = await Promise.all([
+            getClientById(clientId),
+            getCaregiverById(caregiverId)
+        ]);
+
+        // Notify caregiver
+        await createNotification({
+            type: 'caregiver_assigned',
+            title: 'New Client Assignment',
+            message: `You have been assigned to care for ${client?.care_for || client?.name || 'a new client'}.${notes ? ` Notes: ${notes}` : ''}`,
+            caregiver_id: caregiverId,
+            priority: 'normal',
+            related_table: TABLES.CLIENT_CAREGIVER_ASSIGNMENTS,
+            related_record_id: data.id,
+            client_id: clientId
+        });
+
+        // Notify client/family (if they have portal access)
+        if (client?.email) {
+            await createNotification({
+                type: 'caregiver_assigned_family',
+                title: 'Caregiver Assigned',
+                message: `${caregiver?.name || 'A caregiver'} has been assigned to provide care.${notes ? ` Notes: ${notes}` : ''}`,
+                client_id: clientId,
+                priority: 'normal',
+                related_table: TABLES.CLIENT_CAREGIVER_ASSIGNMENTS,
+                related_record_id: data.id,
+                caregiver_id: caregiverId
+            });
+        }
+    }
+
+    return data;
+}
+
+/**
+ * Update an existing assignment
+ * @param {string} id
+ * @param {Object} updates
+ * @param {boolean} [sendNotification=true]
+ * @returns {Promise<boolean>}
+ */
+async function updateClientCaregiverAssignment(id, updates, { sendNotification = true } = {}) {
+    if (!supabaseClient) return false;
+
+    const { error } = await supabaseClient
+        .from(TABLES.CLIENT_CAREGIVER_ASSIGNMENTS)
+        .update({ ...updates, updated_at: new Date().toISOString() })
+        .eq('id', id);
+
+    if (error) { console.error('[CareHub] updateClientCaregiverAssignment error:', error.message); return false; }
+
+    // Send notification if status changed
+    if (sendNotification && updates.status) {
+        const assignment = await getAssignmentById(id);
+        if (assignment) {
+            const typeMap = {
+                'active': 'Assignment Activated',
+                'backup': 'Backup Assignment Set',
+                'ended': 'Assignment Ended'
+            };
+
+            await createNotification({
+                type: 'assignment_status_changed',
+                title: typeMap[updates.status] || 'Assignment Updated',
+                message: `Your assignment for ${assignment.clients?.care_for || 'client'} has been updated to: ${updates.status}`,
+                caregiver_id: assignment.caregiver_id,
+                priority: 'normal',
+                related_table: TABLES.CLIENT_CAREGIVER_ASSIGNMENTS,
+                related_record_id: id,
+                client_id: assignment.client_id
+            });
+        }
+    }
+
+    return true;
+}
+
+/**
+ * End an assignment (set status to ended with end_date)
+ * @param {string} id
+ * @param {string} [reason]
+ * @param {boolean} [sendNotification=true]
+ * @returns {Promise<boolean>}
+ */
+async function endClientCaregiverAssignment(id, { reason = null, sendNotification = true } = {}) {
+    if (!supabaseClient) return false;
+
+    const today = new Date().toISOString().split('T')[0];
+    const updates = {
+        status: 'ended',
+        end_date: today,
+        notes: reason ? `Ended: ${reason}` : 'Assignment ended',
+        updated_at: new Date().toISOString()
+    };
+
+    const { error } = await supabaseClient
+        .from(TABLES.CLIENT_CAREGIVER_ASSIGNMENTS)
+        .update(updates)
+        .eq('id', id);
+
+    if (error) { console.error('[CareHub] endClientCaregiverAssignment error:', error.message); return false; }
+
+    if (sendNotification) {
+        const assignment = await getAssignmentById(id);
+        if (assignment) {
+            await createNotification({
+                type: 'assignment_ended',
+                title: 'Assignment Ended',
+                message: `Your assignment for ${assignment.clients?.care_for || 'client'} has ended.${reason ? ` Reason: ${reason}` : ''}`,
+                caregiver_id: assignment.caregiver_id,
+                priority: 'normal',
+                related_table: TABLES.CLIENT_CAREGIVER_ASSIGNMENTS,
+                related_record_id: id,
+                client_id: assignment.client_id
+            });
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Get all active caregivers for a client
+ * @param {string} clientId
+ * @returns {Promise<Array>}
+ */
+async function getClientCaregivers(clientId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CLIENT_CAREGIVER_ASSIGNMENTS)
+        .select('*, caregivers(id, name, email, phone, city, transportation)')
+        .eq('client_id', clientId)
+        .eq('status', 'active')
+        .or('end_date.is.null,end_date.gte.' + new Date().toISOString().split('T')[0]);
+
+    if (error) { console.error('[CareHub] getClientCaregivers error:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Get all active clients for a caregiver
+ * @param {string} caregiverId
+ * @returns {Promise<Array>}
+ */
+async function getCaregiverClients(caregiverId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CLIENT_CAREGIVER_ASSIGNMENTS)
+        .select('*, clients(id, name, care_for, email, phone, city, address)')
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'active')
+        .or('end_date.is.null,end_date.gte.' + new Date().toISOString().split('T')[0]);
+
+    if (error) { console.error('[CareHub] getCaregiverClients error:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Check if client-caregiver pair has active assignment
+ * @param {string} clientId
+ * @param {string} caregiverId
+ * @returns {Promise<boolean>}
+ */
+async function hasActiveAssignment(clientId, caregiverId) {
+    if (!supabaseClient) return false;
+    const { data, error } = await supabaseClient
+        .rpc('has_active_assignment', { p_client_id: clientId, p_caregiver_id: caregiverId });
+    if (error) { console.error('[CareHub] hasActiveAssignment error:', error.message); return false; }
+    return data || false;
+}
+
+/**
+ * Get active assignment ID for a client-caregiver pair
+ * @param {string} clientId
+ * @param {string} caregiverId
+ * @returns {Promise<string|null>}
+ */
+async function getActiveAssignment(clientId, caregiverId) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .rpc('get_active_assignment', { p_client_id: clientId, p_caregiver_id: caregiverId });
+    if (error) { console.error('[CareHub] getActiveAssignment error:', error.message); return null; }
+    return data;
+}
+
+// ==================== PAYROLL WORKFLOW ====================
+
+/**
+ * Get payroll exports with optional filtering
+ * @param {Object} filters
+ * @param {string} [filters.status]
+ * @param {string} [filters.startDate]
+ * @param {string} [filters.endDate]
+ * @param {number} [filters.limit=50]
+ * @returns {Promise<Array>}
+ */
+async function getPayrollExports({ status = null, startDate = null, endDate = null, limit = 50 } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient
+        .from(TABLES.PAYROLL_EXPORTS)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+    if (status) q = q.eq('status', status);
+    if (startDate) q = q.gte('pay_period_start', startDate);
+    if (endDate) q = q.lte('pay_period_end', endDate);
+
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getPayrollExports error:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Get single payroll export with items
+ * @param {string} id
+ * @returns {Promise<Object|null>}
+ */
+async function getPayrollExportById(id) {
+    if (!supabaseClient) return null;
+    const { data: exportData, error: exportError } = await supabaseClient
+        .from(TABLES.PAYROLL_EXPORTS)
+        .select('*')
+        .eq('id', id)
+        .single();
+
+    if (exportError) { console.error('[CareHub] getPayrollExportById error:', exportError.message); return null; }
+
+    const { data: items, error: itemsError } = await supabaseClient
+        .from(TABLES.PAYROLL_EXPORT_ITEMS)
+        .select('*, caregivers(id, name, email)')
+        .eq('payroll_export_id', id)
+        .order('created_at', { ascending: true });
+
+    if (itemsError) { console.error('[CareHub] getPayrollExportItems error:', itemsError.message); }
+
+    return { ...exportData, items: items || [] };
+}
+
+/**
+ * Create payroll export from approved timesheets
+ * @param {Object} params
+ * @param {string} params.startDate - Pay period start
+ * @param {string} params.endDate - Pay period end
+ * @param {string} params.exportType - gusto, csv, quickbooks
+ * @param {string} params.createdBy - User ID
+ * @returns {Promise<Object|null>}
+ */
+async function createPayrollExport({ startDate, endDate, exportType = 'gusto', createdBy }) {
+    if (!supabaseClient) return null;
+
+    // Get payroll summary for period
+    const { data: summary, error: summaryError } = await supabaseClient
+        .rpc('get_payroll_summary', { p_start_date: startDate, p_end_date: endDate });
+
+    if (summaryError) { console.error('[CareHub] getPayrollSummary error:', summaryError.message); return null; }
+
+    // Create export record
+    const { data: exportRecord, error: exportError } = await supabaseClient
+        .from(TABLES.PAYROLL_EXPORTS)
+        .insert([{
+            pay_period_start: startDate,
+            pay_period_end: endDate,
+            export_type: exportType,
+            status: 'draft',
+            total_hours: summary.reduce((sum, s) => sum + parseFloat(s.total_hours || 0), 0),
+            caregiver_count: summary.length,
+            exported_by: createdBy,
+            created_at: new Date().toISOString()
+        }])
+        .select()
+        .single();
+
+    if (exportError) { console.error('[CareHub] createPayrollExport error:', exportError.message); return null; }
+
+    // Create export items for each caregiver
+    const items = summary.map(s => ({
+        payroll_export_id: exportRecord.id,
+        caregiver_id: s.caregiver_id,
+        regular_hours: s.regular_hours,
+        overtime_hours: s.overtime_hours,
+        total_hours: s.total_hours,
+        mileage: s.mileage,
+        visit_count: s.visit_count,
+        status: 'pending'
+    }));
+
+    if (items.length > 0) {
+        const { error: itemsError } = await supabaseClient
+            .from(TABLES.PAYROLL_EXPORT_ITEMS)
+            .insert(items);
+        if (itemsError) { console.error('[CareHub] createPayrollItems error:', itemsError.message); }
+    }
+
+    return exportRecord;
+}
+
+/**
+ * Update payroll export status and lock timesheets
+ * @param {string} id
+ * @param {string} status - draft, preview, exported, processed
+ * @param {string} [processedBy]
+ * @returns {Promise<boolean>}
+ */
+async function updatePayrollExportStatus(id, status, { processedBy = null } = {}) {
+    if (!supabaseClient) return false;
+
+    const updates = { status, updated_at: new Date().toISOString() };
+
+    if (status === 'exported') {
+        updates.exported_at = new Date().toISOString();
+        updates.exported_by = processedBy;
+
+        // Lock timesheets for this period
+        const { data: exportData } = await supabaseClient
+            .from(TABLES.PAYROLL_EXPORTS)
+            .select('pay_period_start, pay_period_end')
+            .eq('id', id)
+            .single();
+
+        if (exportData) {
+            await supabaseClient.rpc('lock_timesheets_for_export', {
+                p_start_date: exportData.pay_period_start,
+                p_end_date: exportData.pay_period_end,
+                p_export_id: id
+            });
+        }
+    }
+
+    if (status === 'processed') {
+        updates.processed_at = new Date().toISOString();
+    }
+
+    const { error } = await supabaseClient
+        .from(TABLES.PAYROLL_EXPORTS)
+        .update(updates)
+        .eq('id', id);
+
+    if (error) { console.error('[CareHub] updatePayrollExportStatus error:', error.message); return false; }
+    return true;
+}
+
+/**
+ * Get timesheets pending approval
+ * @param {Object} filters
+ * @param {string} [filters.caregiverId]
+ * @param {string} [filters.startDate]
+ * @param {string} [filters.endDate]
+ * @returns {Promise<Array>}
+ */
+async function getPendingTimesheets({ caregiverId = null, startDate = null, endDate = null } = {}) {
+    if (!supabaseClient) return [];
+
+    let q = supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('*, caregivers(id, name), schedules!inner(date, client_id, clients!inner(care_for))')
+        .in('status', ['submitted', 'pending'])
+        .order('date', { ascending: false });
+
+    if (caregiverId) q = q.eq('caregiver_id', caregiverId);
+    if (startDate) q = q.gte('date', startDate);
+    if (endDate) q = q.lte('date', endDate);
+
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getPendingTimesheets error:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Approve timesheet with overtime calculation
+ * @param {string} timesheetId
+ * @param {string} approvedBy - Admin user ID
+ * @param {string} [notes]
+ * @returns {Promise<boolean>}
+ */
+async function approveTimesheet(timesheetId, approvedBy, { notes = null } = {}) {
+    if (!supabaseClient) return false;
+
+    // Get timesheet to calculate overtime
+    const { data: ts, error: tsError } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('caregiver_id, date, hours_worked, week_starting')
+        .eq('id', timesheetId)
+        .single();
+
+    if (tsError || !ts) return false;
+
+    // Calculate regular vs overtime
+    const { data: otCalc, error: otError } = await supabaseClient
+        .rpc('calculate_overtime', {
+            p_caregiver_id: ts.caregiver_id,
+            p_week_start: ts.week_starting || ts.date,
+            p_hours: ts.hours_worked
+        });
+
+    if (otError) { console.error('[CareHub] calculateOvertime error:', otError.message); }
+
+    const regularHours = otCalc?.regular_hours || ts.hours_worked;
+    const overtimeHours = otCalc?.overtime_hours || 0;
+
+    const { error } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .update({
+            status: 'approved',
+            approved_by: approvedBy,
+            approved_at: new Date().toISOString(),
+            regular_hours: regularHours,
+            overtime_hours: overtimeHours,
+            admin_notes: notes,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', timesheetId);
+
+    if (error) { console.error('[CareHub] approveTimesheet error:', error.message); return false; }
+
+    // Notify caregiver
+    const { data: timesheet } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('caregiver_id, date')
+        .eq('id', timesheetId)
+        .single();
+
+    if (timesheet) {
+        await createNotification({
+            type: 'timesheet_approved',
+            title: 'Timesheet Approved',
+            message: `Your timesheet for ${timesheet.date} has been approved.`,
+            caregiver_id: timesheet.caregiver_id,
+            priority: 'normal',
+            related_table: TABLES.TIMESHEETS,
+            related_record_id: timesheetId
+        });
+    }
+
+    return true;
+}
+
+/**
+ * Reject timesheet with reason
+ * @param {string} timesheetId
+ * @param {string} rejectedBy - Admin user ID
+ * @param {string} reason
+ * @returns {Promise<boolean>}
+ */
+async function rejectTimesheet(timesheetId, rejectedBy, reason) {
+    if (!supabaseClient) return false;
+
+    const { error } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .update({
+            status: 'rejected',
+            rejection_reason: reason,
+            approved_by: rejectedBy,
+            approved_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', timesheetId);
+
+    if (error) { console.error('[CareHub] rejectTimesheet error:', error.message); return false; }
+
+    // Notify caregiver
+    const { data: timesheet } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('caregiver_id, date')
+        .eq('id', timesheetId)
+        .single();
+
+    if (timesheet) {
+        await createNotification({
+            type: 'timesheet_rejected',
+            title: 'Timesheet Rejected',
+            message: `Your timesheet for ${timesheet.date} has been rejected. Reason: ${reason}`,
+            caregiver_id: timesheet.caregiver_id,
+            priority: 'high',
+            related_table: TABLES.TIMESHEETS,
+            related_record_id: timesheetId
+        });
+    }
+
+    return true;
+}
+
+/**
+ * Request correction on timesheet
+ * @param {string} timesheetId
+ * @param {string} requestedBy - Admin user ID
+ * @param {string} correctionNotes
+ * @returns {Promise<boolean>}
+ */
+async function requestTimesheetCorrection(timesheetId, requestedBy, correctionNotes) {
+    if (!supabaseClient) return false;
+
+    const { error } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .update({
+            status: 'correction_requested',
+            correction_notes: correctionNotes,
+            approved_by: requestedBy,
+            approved_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', timesheetId);
+
+    if (error) { console.error('[CareHub] requestTimesheetCorrection error:', error.message); return false; }
+
+    // Notify caregiver
+    const { data: timesheet } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('caregiver_id, date')
+        .eq('id', timesheetId)
+        .single();
+
+    if (timesheet) {
+        await createNotification({
+            type: 'timesheet_correction_needed',
+            title: 'Timesheet Correction Needed',
+            message: `Please correct and resubmit your timesheet for ${timesheet.date}. Note: ${correctionNotes}`,
+            caregiver_id: timesheet.caregiver_id,
+            priority: 'high',
+            related_table: TABLES.TIMESHEETS,
+            related_record_id: timesheetId
+        });
+    }
+
+    return true;
+}
+
+/**
+ * Clock in for visit
+ * @param {string} scheduleId
+ * @param {string} caregiverId
+ * @param {Object} [location] - Optional GPS coordinates
+ * @returns {Promise<Object|null>}
+ */
+async function clockIn(scheduleId, caregiverId, { lat = null, lng = null, accuracy = null } = {}) {
+    if (!supabaseClient) return null;
+
+    const now = new Date().toISOString();
+
+    // Create clock event
+    const { data: event, error: eventError } = await supabaseClient
+        .from(TABLES.VISIT_CLOCK_EVENTS)
+        .insert([{
+            schedule_id: scheduleId,
+            caregiver_id: caregiverId,
+            event_type: 'clock_in',
+            event_time: now,
+            location_lat: lat,
+            location_lng: lng,
+            location_accuracy: accuracy
+        }])
+        .select()
+        .single();
+
+    if (eventError) { console.error('[CareHub] clockIn error:', eventError.message); return null; }
+
+    // Update schedule status
+    const { error: scheduleError } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .update({
+            lifecycle_status: 'in_progress',
+            actual_start_time: now,
+            gps_verified: !!(lat && lng),
+            updated_at: now
+        })
+        .eq('id', scheduleId);
+
+    if (scheduleError) { console.error('[CareHub] updateScheduleClockIn error:', scheduleError.message); }
+
+    return event;
+}
+
+/**
+ * Clock out for visit
+ * @param {string} scheduleId
+ * @param {string} caregiverId
+ * @param {Object} [location] - Optional GPS coordinates
+ * @param {string} [notes]
+ * @returns {Promise<Object|null>}
+ */
+async function clockOut(scheduleId, caregiverId, { lat = null, lng = null, accuracy = null, notes = null } = {}) {
+    if (!supabaseClient) return null;
+
+    const now = new Date().toISOString();
+
+    // Get clock in time to calculate duration
+    const { data: clockIn } = await supabaseClient
+        .from(TABLES.VISIT_CLOCK_EVENTS)
+        .select('event_time')
+        .eq('schedule_id', scheduleId)
+        .eq('caregiver_id', caregiverId)
+        .eq('event_type', 'clock_in')
+        .order('event_time', { ascending: false })
+        .limit(1)
+        .single();
+
+    let durationMinutes = null;
+    if (clockIn) {
+        const start = new Date(clockIn.event_time);
+        const end = new Date(now);
+        durationMinutes = Math.round((end - start) / 60000);
+    }
+
+    // Create clock out event
+    const { data: event, error: eventError } = await supabaseClient
+        .from(TABLES.VISIT_CLOCK_EVENTS)
+        .insert([{
+            schedule_id: scheduleId,
+            caregiver_id: caregiverId,
+            event_type: 'clock_out',
+            event_time: now,
+            location_lat: lat,
+            location_lng: lng,
+            location_accuracy: accuracy,
+            notes
+        }])
+        .select()
+        .single();
+
+    if (eventError) { console.error('[CareHub] clockOut error:', eventError.message); return null; }
+
+    // Update schedule status
+    const { error: scheduleError } = await supabaseClient
+        .from(TABLES.SCHEDULES)
+        .update({
+            lifecycle_status: 'completed',
+            actual_end_time: now,
+            actual_duration_minutes: durationMinutes,
+            completion_notes: notes,
+            gps_verified: !!(lat && lng),
+            updated_at: now
+        })
+        .eq('id', scheduleId);
+
+    if (scheduleError) { console.error('[CareHub] updateScheduleClockOut error:', scheduleError.message); }
+
+    return { ...event, duration_minutes: durationMinutes };
+}
+
+/**
+ * Get clock events for a schedule
+ * @param {string} scheduleId
+ * @returns {Promise<Array>}
+ */
+async function getClockEvents(scheduleId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.VISIT_CLOCK_EVENTS)
+        .select('*')
+        .eq('schedule_id', scheduleId)
+        .order('event_time', { ascending: true });
+    if (error) { console.error('[CareHub] getClockEvents error:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Validate timesheet for conflicts
+ * @param {Object} timesheet
+ * @returns {Promise<Array>} - Array of conflict warnings
+ */
+async function validateTimesheet(timesheet) {
+    if (!supabaseClient) return [];
+    const conflicts = [];
+
+    // Check 1: Hours match scheduled duration
+    if (timesheet.schedule_ids && timesheet.schedule_ids.length > 0) {
+        const { data: schedules } = await supabaseClient
+            .from(TABLES.SCHEDULES)
+            .select('id, start_time, end_time, actual_duration_minutes')
+            .in('id', timesheet.schedule_ids);
+
+        if (schedules) {
+            let scheduledMinutes = 0;
+            for (const s of schedules) {
+                if (s.actual_duration_minutes) {
+                    scheduledMinutes += s.actual_duration_minutes;
+                } else {
+                    // Calculate from start/end times
+                    const [startH, startM] = s.start_time.split(':').map(Number);
+                    const [endH, endM] = s.end_time.split(':').map(Number);
+                    scheduledMinutes += ((endH * 60 + endM) - (startH * 60 + startM));
+                }
+            }
+
+            const submittedHours = timesheet.hours_worked || 0;
+            const submittedMinutes = submittedHours * 60;
+            const variance = Math.abs(submittedMinutes - scheduledMinutes);
+
+            if (variance > 15) { // 15 minutes tolerance
+                conflicts.push({
+                    type: 'duration_mismatch',
+                    severity: 'warning',
+                    message: `Submitted hours (${submittedHours}h) differ from scheduled duration (${Math.round(scheduledMinutes/60*10)/10}h)`
+                });
+            }
+        }
+    }
+
+    // Check 2: Overlapping timesheets
+    const { data: overlapping } = await supabaseClient
+        .from(TABLES.TIMESHEETS)
+        .select('id, date, hours_worked')
+        .eq('caregiver_id', timesheet.caregiver_id)
+        .eq('date', timesheet.date)
+        .neq('id', timesheet.id || '00000000-0000-0000-0000-000000000000')
+        .in('status', ['submitted', 'pending', 'approved']);
+
+    if (overlapping && overlapping.length > 0) {
+        const totalHours = overlapping.reduce((sum, t) => sum + parseFloat(t.hours_worked || 0), 0) + parseFloat(timesheet.hours_worked || 0);
+        if (totalHours > 16) {
+            conflicts.push({
+                type: 'excessive_hours',
+                severity: 'error',
+                message: `Total hours for this day (${totalHours}h) exceeds 16-hour safety limit`
+            });
+        }
+    }
+
+    // Check 3: Excessive mileage
+    if (timesheet.mileage && timesheet.mileage > 100) {
+        conflicts.push({
+            type: 'high_mileage',
+            severity: 'warning',
+            message: `Mileage (${timesheet.mileage} miles) seems high for a single day`
+        });
+    }
+
+    // Check 4: Visit not completed but timesheet submitted
+    if (timesheet.schedule_ids) {
+        const { data: incomplete } = await supabaseClient
+            .from(TABLES.SCHEDULES)
+            .select('id, lifecycle_status')
+            .in('id', timesheet.schedule_ids)
+            .not('lifecycle_status', 'eq', 'completed');
+
+        if (incomplete && incomplete.length > 0) {
+            conflicts.push({
+                type: 'incomplete_visit',
+                severity: 'error',
+                message: `${incomplete.length} visit(s) not marked as completed`
+            });
+        }
+    }
+
+    return conflicts;
+}
+
+/**
+ * Export payroll to CSV format (Gusto-compatible)
+ * @param {string} exportId
+ * @returns {Promise<string|null>} - CSV content
+ */
+async function exportPayrollToCSV(exportId) {
+    if (!supabaseClient) return null;
+
+    const { data: exportData } = await getPayrollExportById(exportId);
+    if (!exportData) return null;
+
+    // Gusto CSV format
+    const headers = ['Employee ID', 'Employee Name', 'Regular Hours', 'Overtime Hours', 'Mileage', 'Mileage Reimbursement', 'Total Pay'];
+
+    const rows = exportData.items.map(item => [
+        item.caregiver_id,
+        item.caregivers?.name || 'Unknown',
+        item.regular_hours,
+        item.overtime_hours,
+        item.mileage,
+        item.mileage_reimbursement,
+        item.total_pay
+    ]);
+
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    return csv;
+}
+
+// Global exports for browser use
+if (typeof window !== 'undefined') {
+    window.getTrainingAssignments = getTrainingAssignments;
+    window.assignTrainingModule = assignTrainingModule;
+    window.updateTrainingAssignment = updateTrainingAssignment;
+    window.markTrainingComplete = markTrainingComplete;
+    window.acknowledgeTraining = acknowledgeTraining;
+    window.getTrainingAssignmentById = getTrainingAssignmentById;
+    window.getTrainingModuleById = getTrainingModuleById;
+    window.updateTrainingStatusToInProgress = updateTrainingStatusToInProgress;
+    window.getOnboardingSteps = getOnboardingSteps;
+    window.createOnboardingStep = createOnboardingStep;
+    window.updateOnboardingStep = updateOnboardingStep;
+    window.deleteOnboardingStep = deleteOnboardingStep;
+    window.getOnboardingProgress = getOnboardingProgress;
+    window.updateOnboardingProgress = updateOnboardingProgress;
+    window.getOnboardingStepById = getOnboardingStepById;
+    window.getAllOnboardingProgress = getAllOnboardingProgress;
+    window.flagCaregiver = flagCaregiver;
+    window.unflagCaregiver = unflagCaregiver;
+    window.getCaregiverTrainingStats = getCaregiverTrainingStats;
+    window.getAllCaregiversTrainingStats = getAllCaregiversTrainingStats;
+    window.getOverdueTrainingAssignments = getOverdueTrainingAssignments;
+    window.getTrainingApproachingDue = getTrainingApproachingDue;
+    window._formatDueDate = _formatDueDate;
+    window._isUrgentDue = _isUrgentDue;
+    window._isOverdue = _isOverdue;
+    // Time-off requests
+    window.getTimeOffRequests = getTimeOffRequests;
+    window.getPendingTimeOffCount = getPendingTimeOffCount;
+    window.createTimeOffRequest = createTimeOffRequest;
+    window.reviewTimeOffRequest = reviewTimeOffRequest;
+    window.cancelTimeOffRequest = cancelTimeOffRequest;
+    window.checkCaregiverTimeOff = checkCaregiverTimeOff;
+    // Client-Caregiver Assignments
+    window.getClientCaregiverAssignments = getClientCaregiverAssignments;
+    window.getAssignmentById = getAssignmentById;
+    window.createClientCaregiverAssignment = createClientCaregiverAssignment;
+    window.updateClientCaregiverAssignment = updateClientCaregiverAssignment;
+    window.endClientCaregiverAssignment = endClientCaregiverAssignment;
+    window.getClientCaregivers = getClientCaregivers;
+    window.getCaregiverClients = getCaregiverClients;
+    window.hasActiveAssignment = hasActiveAssignment;
+    window.getActiveAssignment = getActiveAssignment;
+    // Payroll Workflow
+    window.getPayrollExports = getPayrollExports;
+    window.getPayrollExportById = getPayrollExportById;
+    window.createPayrollExport = createPayrollExport;
+    window.updatePayrollExportStatus = updatePayrollExportStatus;
+    window.getPendingTimesheets = getPendingTimesheets;
+    window.approveTimesheet = approveTimesheet;
+    window.rejectTimesheet = rejectTimesheet;
+    window.requestTimesheetCorrection = requestTimesheetCorrection;
+    window.clockIn = clockIn;
+    window.clockOut = clockOut;
+    window.getClockEvents = getClockEvents;
+    window.validateTimesheet = validateTimesheet;
+    window.exportPayrollToCSV = exportPayrollToCSV;
 }

@@ -2,11 +2,20 @@
 
 ## Overview
 
-When a new caregiver is approved and their portal account is created, the onboarding workflow tracks their progress from initial setup through orientation completion.
+When a new caregiver is approved and their portal account is created, the onboarding workflow tracks their progress from initial setup through orientation completion. The system supports both a legacy checklist (`onboarding_checklist`) and a new structured progress system (`onboarding_steps` + `caregiver_onboarding_progress`) with detailed step tracking, due dates, and flagging capabilities.
+
+**Key Features:**
+- 8 default onboarding steps with progress tracking
+- Due date management and overdue detection
+- Caregiver flagging for attention-required cases
+- Real-time progress bars in Training Hub and caregiver profiles
+- Automatic notifications for step completions and flags
 
 ---
 
 ## Step-by-Step Flow
+
+### Legacy Checklist Flow
 
 ```
 1. Caregiver application approved (Applications page)
@@ -14,7 +23,6 @@ When a new caregiver is approved and their portal account is created, the onboar
 2. Admin creates caregiver profile (Caregivers page)
         ↓
 3. Migration seeds onboarding_checklist row automatically
-   (OR admin runs: INSERT INTO onboarding_checklist (caregiver_id) VALUES (...))
         ↓
 4. Admin sends portal invite (sendCaregiverInvite in Caregivers page)
    → Notification created: invite_sent or invite_queued
@@ -37,9 +45,40 @@ When a new caregiver is approved and their portal account is created, the onboar
 12. Progress bar reaches 100% → caregiver is fully onboarded
 ```
 
+### New Onboarding Progress Flow (Recommended)
+
+```
+1. Caregiver application approved → profile created
+        ↓
+2. Admin opens caregiver profile → Onboarding tab
+   → 8 default steps are available for tracking
+        ↓
+3. Admin sets due dates for critical steps
+        ↓
+4. Admin assigns training modules with due dates
+        ↓
+5. Admin updates step status as caregiver progresses:
+   - not_started → in_progress → completed
+        ↓
+6. System sends notifications:
+   - training_assigned (when module assigned)
+   - onboarding_step_completed (when step marked done)
+        ↓
+7. If issues arise, admin can flag caregiver with reason
+   → High-priority notification sent to all admins
+        ↓
+8. Progress tracked in real-time in both:
+   - Caregiver profile (Onboarding tab)
+   - Training Hub (Onboarding table)
+        ↓
+9. 100% completion → caregiver fully onboarded
+```
+
 ---
 
-## Onboarding Checklist Steps
+## Onboarding Systems
+
+### System 1: Legacy Checklist (onboarding_checklist table)
 
 | Step | Field | Who marks it |
 |---|---|---|
@@ -52,6 +91,25 @@ When a new caregiver is approved and their portal account is created, the onboar
 | Orientation Completed | `orientation_completed` | Admin |
 | Background Check | `background_check_status` | Admin (pending → submitted → cleared) |
 
+### System 2: Structured Progress (onboarding_steps + caregiver_onboarding_progress)
+
+| Step | Category | Required | Default Order |
+|---|---|---|---|
+| Complete Profile | paperwork | Yes | 1 |
+| Sign Handbook Acknowledgement | compliance | Yes | 2 |
+| Review Emergency Protocols | safety | Yes | 3 |
+| Complete Timesheet Training | training | Yes | 4 |
+| Complete Visit Update Training | training | Yes | 5 |
+| Upload Required Documents | paperwork | Yes | 6 |
+| Attend Orientation | training | Yes | 7 |
+| Background Check Cleared | compliance | Yes | 8 |
+
+**Status Options:**
+- `not_started` - Step not yet begun
+- `in_progress` - Currently working on this step
+- `completed` - Step finished
+- `flagged` - Issue requiring attention (with flagged_reason)
+
 ---
 
 ## Admin Workflow — Daily Use
@@ -60,23 +118,55 @@ When a new caregiver is approved and their portal account is created, the onboar
 1. Approve their application → Caregivers page → their profile is created
 2. Go to **Training Hub → Onboarding** → their row appears automatically
 3. Click **Edit** to begin tracking their progress
+4. OR open caregiver profile → Onboarding tab for detailed step management
 
 ### Assigning Training
 1. **Training Hub → Training** → find a module → click **Assign**
 2. Select caregiver, set due date, optional notes → Save
 3. Caregiver receives an in-app notification immediately
+4. Urgent due dates (within 2 days) trigger high-priority notifications
 
 ### Tracking Progress
-- **Onboarding tab** shows a live progress table for all caregivers
+- **Training Hub → Onboarding tab** shows table for all caregivers
+- **Caregiver Profile → Onboarding tab** shows detailed step-by-step progress
 - Progress bars update immediately when you save changes
 - Background check status is color-coded: `pending` = amber, `cleared` = green, `failed` = red
 
+### Setting Due Dates
+1. Open caregiver profile → Onboarding tab
+2. Click "Set Due Date" to assign deadlines to steps
+3. System automatically calculates and displays countdowns:
+   - "Due in 5 days" (normal)
+   - "Due tomorrow" (warning)
+   - "Due today" (urgent)
+   - "Overdue by 2 days" (critical)
+
+### Flagging Caregivers
+When a caregiver needs special attention:
+1. Open caregiver profile → Onboarding tab
+2. Click "Flag Caregiver" button
+3. Enter reason (e.g., "Missing documents", "Background check delayed")
+4. Optional: Add admin notes for internal reference
+5. System sends high-priority notification to all admins
+6. Flagged status appears prominently in caregiver lists
+
+### Removing Flags
+Once issues are resolved:
+1. Open flagged caregiver's profile
+2. Click "Remove Flag" button
+3. Status returns to normal tracking
+
 ### Recommended Required Training for New Hires
-1. Company Orientation (category: `onboarding`, requires_acknowledgement: true)
-2. Emergency Procedures (category: `safety`, requires_acknowledgement: true)
-3. Timesheet Completion Guide (category: `policy`)
-4. Visit Update Training (category: `policy`)
-5. Client Communication Rules (category: `soft_skills`)
+1. Caregiver Handbook (type: `document`, is_required: true)
+2. Emergency Procedures (type: `video`, is_required: true)
+3. Timesheet Training (type: `video`, is_required: true)
+4. Visit Update Training (type: `video`, is_required: true)
+5. HIPAA & Privacy (type: `acknowledgement`, is_required: true)
+6. Mileage Policy (type: `document`, is_required: true)
+7. Dress Code Policy (type: `document`, is_required: true)
+8. Incident Reporting (type: `acknowledgement`, is_required: true)
+
+**Estimated Total Time:** ~2.5 hours for all required modules
 
 ---
 
