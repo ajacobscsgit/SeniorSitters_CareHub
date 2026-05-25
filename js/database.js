@@ -778,125 +778,198 @@ async function updateClient(id, updates) {
 
 // ==================== NOTIFICATIONS ====================
 
+/** Valid notification type values */
+const NOTIFICATION_TYPES = [
+    'new_visit_assigned', 'visit_changed', 'visit_cancelled', 'caregiver_reassigned',
+    'timesheet_submitted', 'timesheet_approved', 'timesheet_rejected',
+    'visit_update_submitted', 'visit_update_approved', 'visit_update_rejected',
+    'training_assigned', 'invite_queued', 'invite_sent', 'emergency_alert',
+    'schedule_created', 'schedule_updated'
+];
+
 /**
- * Create a notification
- * @param {Object} notification 
+ * Create a notification row.
+ *
+ * @param {Object} n
+ * @param {string}  n.type               – one of NOTIFICATION_TYPES
+ * @param {string}  n.title
+ * @param {string}  n.message
+ * @param {string}  [n.recipient_user_id] – specific auth user
+ * @param {string}  [n.recipient_role]    – 'admin_owner'|'co_owner'|'caregiver'|'client_family'
+ * @param {string}  [n.caregiver_id]
+ * @param {string}  [n.client_id]
+ * @param {string}  [n.priority]          – 'low'|'normal'|'high'|'emergency'  (default: 'normal')
+ * @param {string}  [n.related_table]     – table name the event concerns
+ * @param {string}  [n.related_record_id] – uuid of the related row
+ * @param {string}  [n.related_type]      – legacy alias kept for backward compat
+ * @param {string}  [n.related_id]        – legacy alias kept for backward compat
  * @returns {Promise<Object|null>}
  */
-async function createNotification(notification) {
+async function createNotification(n) {
     if (!supabaseClient) return null;
 
-    const notificationData = {
-        ...notification,
-        read: false,
-        created_at: new Date().toISOString()
+    const row = {
+        type:               n.type,
+        title:              n.title,
+        message:            n.message,
+        recipient_user_id:  n.recipient_user_id  || null,
+        recipient_role:     n.recipient_role     || null,
+        caregiver_id:       n.caregiver_id       || null,
+        client_id:          n.client_id          || null,
+        priority:           n.priority           || 'normal',
+        related_table:      n.related_table      || n.related_type  || null,
+        related_record_id:  n.related_record_id  || n.related_id    || null,
+        read:               false,
+        read_at:            null,
+        created_at:         new Date().toISOString()
     };
 
-    if (window.DEBUG) console.log('[CareHub] Creating notification:', notificationData);
+    if (window.DEBUG) console.log('[CareHub] createNotification:', row);
 
     const { data, error } = await supabaseClient
         .from(TABLES.NOTIFICATIONS)
-        .insert([notificationData])
+        .insert([row])
         .select()
         .single();
 
     if (error) {
-        console.error('[CareHub] ERROR creating notification:', error);
-        console.error('[CareHub] Error code:', error.code);
-        console.error('[CareHub] Error message:', error.message);
-        console.error('[CareHub] Error details:', error.details);
-
-        // Check for missing column errors
-        if (error.message && error.message.includes('column')) {
-            const columnMatch = error.message.match(/column "([^"]+)"/);
-            if (columnMatch) {
-                console.error(`[CareHub] MISSING COLUMN: notifications table needs column "${columnMatch[1]}"`);
-            }
-        }
-
+        console.error('[CareHub] ERROR createNotification:', error.message, error.details);
         return null;
     }
 
-    if (window.DEBUG) console.log('[CareHub] Notification created successfully:', data);
+    if (window.DEBUG) console.log('[CareHub] Notification created:', data?.id);
     return data;
 }
 
 /**
- * Get unread notifications
+ * Get unread notifications (bell badge + dropdown — max 20).
+ * RLS enforces role-scoping; JS-layer double-checks for safety.
  * @returns {Promise<Array>}
  */
 async function getUnreadNotifications() {
     if (!supabaseClient) return [];
 
-    // Non-admin roles: only surface notifications relevant to their own records.
-    // Notifications table must have optional caregiver_id and client_id columns.
-    // Global notifications (no id attached) are only shown to full-access roles.
-    const isFullAccess = window.RoleFilter ? window.RoleFilter._isFullAccess() : true;
-
-    let query = supabaseClient
+    const { data, error } = await supabaseClient
         .from(TABLES.NOTIFICATIONS)
         .select('*')
-        .eq('read', false)
+        .is('read_at', null)
         .order('created_at', { ascending: false })
         .limit(20);
 
-    if (!isFullAccess && window.getCurrentRole) {
-        const role = window.getCurrentRole();
-        if (role === 'caregiver') {
-            const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
-            if (!caregiverId) return [];
-            // Notifications where caregiver_id matches OR the notification is addressed to them
-            query = query.or(`caregiver_id.eq.${caregiverId},related_type.eq.caregiver`);
-        } else if (role === 'client_family') {
-            const clientId = window.RoleFilter ? window.RoleFilter.getCurrentClientId() : null;
-            if (!clientId) return [];
-            query = query.or(`client_id.eq.${clientId},related_type.eq.client`);
-        } else {
-            return [];
-        }
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-        console.error('Error fetching notifications:', error);
-        return [];
-    }
-
-    // JS-level safety net for notifications
-    if (!isFullAccess) {
-        const role = window.getCurrentRole ? window.getCurrentRole() : null;
-        const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
-        const clientId    = window.RoleFilter ? window.RoleFilter.getCurrentClientId()    : null;
-        return (data || []).filter(n => {
-            if (role === 'caregiver')    return !n.caregiver_id || String(n.caregiver_id) === String(caregiverId);
-            if (role === 'client_family') return !n.client_id    || String(n.client_id)    === String(clientId);
-            return false;
-        }).slice(0, 10);
-    }
-
-    return (data || []).slice(0, 10);
+    if (error) { console.error('[CareHub] getUnreadNotifications error:', error.message); return []; }
+    return _filterNotificationsForRole(data || []);
 }
 
 /**
- * Mark notification as read
- * @param {string} id 
+ * Get notifications with optional filters (for the Notifications page).
+ * @param {Object}  opts
+ * @param {boolean} [opts.unreadOnly]
+ * @param {string}  [opts.type]
+ * @param {string}  [opts.priority]
+ * @param {number}  [opts.limit=50]
+ * @param {number}  [opts.offset=0]
+ * @returns {Promise<Array>}
+ */
+async function getNotifications({ unreadOnly = false, type = null, priority = null, limit = 50, offset = 0 } = {}) {
+    if (!supabaseClient) return [];
+
+    let q = supabaseClient
+        .from(TABLES.NOTIFICATIONS)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
+    if (unreadOnly) q = q.is('read_at', null);
+    if (type)       q = q.eq('type', type);
+    if (priority)   q = q.eq('priority', priority);
+
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getNotifications error:', error.message); return []; }
+    return _filterNotificationsForRole(data || []);
+}
+
+/**
+ * Get count of unread notifications for badge.
+ * @returns {Promise<number>}
+ */
+async function getNotificationCount() {
+    if (!supabaseClient) return 0;
+    const { count, error } = await supabaseClient
+        .from(TABLES.NOTIFICATIONS)
+        .select('id', { count: 'exact', head: true })
+        .is('read_at', null);
+    if (error) { console.error('[CareHub] getNotificationCount error:', error.message); return 0; }
+    return count || 0;
+}
+
+/**
+ * Mark a single notification as read.
+ * @param {string} id
  * @returns {Promise<boolean>}
  */
 async function markNotificationRead(id) {
     if (!supabaseClient) return false;
-    
+    const now = new Date().toISOString();
     const { error } = await supabaseClient
         .from(TABLES.NOTIFICATIONS)
-        .update({ read: true, updated_at: new Date().toISOString() })
+        .update({ read: true, read_at: now })
         .eq('id', id);
-    
-    if (error) {
-        console.error('Error marking notification read:', error);
-        return false;
-    }
-    
+    if (error) { console.error('[CareHub] markNotificationRead error:', error.message); return false; }
     return true;
+}
+
+/**
+ * Mark all unread notifications as read (for the current role's visible set).
+ * @returns {Promise<boolean>}
+ */
+async function markAllNotificationsRead() {
+    if (!supabaseClient) return false;
+    const now = new Date().toISOString();
+    const { error } = await supabaseClient
+        .from(TABLES.NOTIFICATIONS)
+        .update({ read: true, read_at: now })
+        .is('read_at', null);
+    if (error) { console.error('[CareHub] markAllNotificationsRead error:', error.message); return false; }
+    return true;
+}
+
+/**
+ * Delete a single notification.
+ * @param {string} id
+ * @returns {Promise<boolean>}
+ */
+async function deleteNotification(id) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient
+        .from(TABLES.NOTIFICATIONS)
+        .delete()
+        .eq('id', id);
+    if (error) { console.error('[CareHub] deleteNotification error:', error.message); return false; }
+    return true;
+}
+
+/** @private JS-layer role safety filter (RLS is the real gate) */
+function _filterNotificationsForRole(rows) {
+    const isFullAccess = window.RoleFilter ? window.RoleFilter._isFullAccess() : true;
+    if (isFullAccess) return rows;
+
+    const role       = window.getCurrentRole ? window.getCurrentRole() : null;
+    const cgId       = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    const clId       = window.RoleFilter ? window.RoleFilter.getCurrentClientId()    : null;
+
+    return rows.filter(n => {
+        if (role === 'caregiver') {
+            if (n.recipient_role === 'caregiver') return true;
+            if (n.caregiver_id && String(n.caregiver_id) === String(cgId)) return true;
+            return false;
+        }
+        if (role === 'client_family') {
+            if (n.recipient_role === 'client_family') return true;
+            if (n.client_id && String(n.client_id) === String(clId)) return true;
+            return false;
+        }
+        return false;
+    });
 }
 
 // ==================== DASHBOARD STATS ====================
@@ -1596,7 +1669,11 @@ async function updateSchedule(id, updates) {
         'status',
         'service_type',
         'location',
-        'notes'
+        'notes',
+        'is_recurring',
+        'recurrence_rule',
+        'recurrence_end_date',
+        'recurrence_parent_id'
     ];
 
     // Filter updates to only include allowed columns
@@ -2082,6 +2159,630 @@ async function markVisitUpdateInternal(id) {
     });
 }
 
+// ==================== CLIENT SCHEDULE PREFERENCES ====================
+
+/**
+ * Get schedule preferences for a client.
+ * @param {string} clientId
+ * @returns {Promise<Object|null>}
+ */
+async function getClientSchedulePreferences(clientId) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.CLIENT_SCHEDULE_PREFERENCES)
+        .select('*')
+        .eq('client_id', clientId)
+        .maybeSingle();
+    if (error) { console.error('[CareHub] Error fetching client schedule preferences:', error.message); return null; }
+    return data;
+}
+
+/**
+ * Save (upsert) schedule preferences for a client.
+ * @param {string} clientId
+ * @param {Object} prefs
+ * @returns {Promise<Object|null>}
+ */
+async function saveClientSchedulePreferences(clientId, prefs) {
+    if (!supabaseClient) return null;
+    const row = {
+        client_id:          clientId,
+        preferred_days:     prefs.preferred_days     || [],
+        preferred_start:    prefs.preferred_start    || null,
+        preferred_end:      prefs.preferred_end      || null,
+        visit_length_hours: prefs.visit_length_hours || null,
+        frequency:          prefs.frequency          || null,
+        service_type:       prefs.service_type       || null,
+        start_date:         prefs.start_date         || null,
+        is_recurring:       prefs.is_recurring !== false,
+        notes:              prefs.notes              || null,
+        updated_at:         new Date().toISOString()
+    };
+    if (window.DEBUG) console.log('[CareHub] saveClientSchedulePreferences:', row);
+    const { data, error } = await supabaseClient
+        .from(TABLES.CLIENT_SCHEDULE_PREFERENCES)
+        .upsert(row, { onConflict: 'client_id' })
+        .select()
+        .single();
+    if (error) { console.error('[CareHub] Error saving client schedule preferences:', error.message); return null; }
+    return data;
+}
+
+// ==================== CAREGIVER AVAILABILITY ====================
+
+/**
+ * Get availability slots for a caregiver.
+ * @param {string} caregiverId
+ * @returns {Promise<Array>}
+ */
+async function getCaregiverAvailability(caregiverId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_AVAILABILITY)
+        .select('*')
+        .eq('caregiver_id', caregiverId)
+        .order('day_of_week');
+    if (error) { console.error('[CareHub] Error fetching caregiver availability:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Get availability for multiple caregivers at once.
+ * @param {string[]} caregiverIds
+ * @returns {Promise<Array>}
+ */
+async function getCaregiverAvailabilityBulk(caregiverIds) {
+    if (!supabaseClient || !caregiverIds.length) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_AVAILABILITY)
+        .select('*')
+        .in('caregiver_id', caregiverIds);
+    if (error) { console.error('[CareHub] Error fetching bulk caregiver availability:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Save availability slots for a caregiver.
+ * Replaces ALL existing slots for that caregiver.
+ * @param {string} caregiverId
+ * @param {Array<{day_of_week, start_time, end_time, max_hours_week, service_area, notes}>} slots
+ * @returns {Promise<boolean>}
+ */
+async function saveCaregiverAvailability(caregiverId, slots) {
+    if (!supabaseClient) return false;
+    if (window.DEBUG) console.log('[CareHub] saveCaregiverAvailability:', caregiverId, slots);
+
+    const { error: delError } = await supabaseClient
+        .from(TABLES.CAREGIVER_AVAILABILITY)
+        .delete()
+        .eq('caregiver_id', caregiverId);
+    if (delError) { console.error('[CareHub] Error clearing caregiver availability:', delError.message); return false; }
+
+    if (!slots || slots.length === 0) return true;
+
+    const rows = slots.map(s => ({
+        caregiver_id:  caregiverId,
+        day_of_week:   s.day_of_week,
+        start_time:    s.start_time,
+        end_time:      s.end_time,
+        max_hours_week: s.max_hours_week || null,
+        service_area:  s.service_area || null,
+        notes:         s.notes || null,
+        updated_at:    new Date().toISOString()
+    }));
+
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_AVAILABILITY)
+        .insert(rows);
+    if (error) { console.error('[CareHub] Error inserting caregiver availability:', error.message); return false; }
+    return true;
+}
+
+// ==================== CAREGIVER UNAVAILABLE DATES ====================
+
+/**
+ * Get blocked dates for a caregiver.
+ * @param {string} caregiverId
+ * @returns {Promise<Array>}
+ */
+async function getCaregiverUnavailableDates(caregiverId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_UNAVAILABLE_DATES)
+        .select('*')
+        .eq('caregiver_id', caregiverId)
+        .order('date');
+    if (error) { console.error('[CareHub] Error fetching unavailable dates:', error.message); return []; }
+    return data || [];
+}
+
+/**
+ * Add a blocked date for a caregiver.
+ * @param {string} caregiverId
+ * @param {string} date  – ISO date string YYYY-MM-DD
+ * @param {string} reason
+ * @returns {Promise<boolean>}
+ */
+async function addCaregiverUnavailableDate(caregiverId, date, reason = '') {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_UNAVAILABLE_DATES)
+        .upsert({ caregiver_id: caregiverId, date, reason }, { onConflict: 'caregiver_id,date' });
+    if (error) { console.error('[CareHub] Error adding unavailable date:', error.message); return false; }
+    return true;
+}
+
+/**
+ * Remove a blocked date for a caregiver.
+ * @param {string} caregiverId
+ * @param {string} date  – ISO date string YYYY-MM-DD
+ * @returns {Promise<boolean>}
+ */
+async function removeCaregiverUnavailableDate(caregiverId, date) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient
+        .from(TABLES.CAREGIVER_UNAVAILABLE_DATES)
+        .delete()
+        .eq('caregiver_id', caregiverId)
+        .eq('date', date);
+    if (error) { console.error('[CareHub] Error removing unavailable date:', error.message); return false; }
+    return true;
+}
+
+// ==================== CONFLICT CHECKING ====================
+
+/**
+ * Check for scheduling conflicts for a proposed visit.
+ * Returns an array of conflict objects (empty = no conflicts).
+ *
+ * Checks:
+ *   1. Caregiver already booked at that time
+ *   2. Client already has a visit at that time
+ *   3. Caregiver is on an unavailable date
+ *   4. Visit falls outside caregiver's availability window for that day
+ *
+ * @param {Object} proposed
+ * @param {string}  proposed.date          – YYYY-MM-DD
+ * @param {string}  proposed.start_time    – HH:MM
+ * @param {string}  proposed.end_time      – HH:MM
+ * @param {string}  proposed.caregiver_id
+ * @param {string}  proposed.client_id
+ * @param {string}  [proposed.exclude_id]  – schedule id to ignore (for edits)
+ * @returns {Promise<Array<{type, message}>>}
+ */
+async function checkScheduleConflicts(proposed) {
+    if (!supabaseClient) return [];
+    const conflicts = [];
+    const { date, start_time, end_time, caregiver_id, client_id, exclude_id } = proposed;
+
+    // ── 1. Caregiver double-booking ──────────────────────────────────────────
+    if (caregiver_id) {
+        let q = supabaseClient
+            .from(TABLES.SCHEDULES)
+            .select('id, start_time, end_time')
+            .eq('caregiver_id', caregiver_id)
+            .eq('date', date)
+            .not('status', 'eq', 'cancelled');
+        if (exclude_id) q = q.neq('id', exclude_id);
+        const { data: cgVisits } = await q;
+        if (cgVisits) {
+            for (const v of cgVisits) {
+                if (_timesOverlap(start_time, end_time, v.start_time, v.end_time)) {
+                    conflicts.push({
+                        type: 'caregiver_booked',
+                        message: `Caregiver is already booked ${v.start_time}–${v.end_time} on this date.`
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── 2. Client double-booking ─────────────────────────────────────────────
+    if (client_id) {
+        let q = supabaseClient
+            .from(TABLES.SCHEDULES)
+            .select('id, start_time, end_time')
+            .eq('client_id', client_id)
+            .eq('date', date)
+            .not('status', 'eq', 'cancelled');
+        if (exclude_id) q = q.neq('id', exclude_id);
+        const { data: clVisits } = await q;
+        if (clVisits) {
+            for (const v of clVisits) {
+                if (_timesOverlap(start_time, end_time, v.start_time, v.end_time)) {
+                    conflicts.push({
+                        type: 'client_booked',
+                        message: `Client already has a visit ${v.start_time}–${v.end_time} on this date.`
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── 3. Caregiver unavailable date ────────────────────────────────────────
+    if (caregiver_id) {
+        const { data: blocked } = await supabaseClient
+            .from(TABLES.CAREGIVER_UNAVAILABLE_DATES)
+            .select('reason')
+            .eq('caregiver_id', caregiver_id)
+            .eq('date', date)
+            .maybeSingle();
+        if (blocked) {
+            conflicts.push({
+                type: 'unavailable_date',
+                message: `Caregiver marked unavailable on this date${blocked.reason ? ': ' + blocked.reason : ''}.`
+            });
+        }
+    }
+
+    // ── 4. Outside availability window ──────────────────────────────────────
+    if (caregiver_id) {
+        const dow = _dateToDayOfWeek(date);
+        const { data: slots } = await supabaseClient
+            .from(TABLES.CAREGIVER_AVAILABILITY)
+            .select('start_time, end_time')
+            .eq('caregiver_id', caregiver_id)
+            .eq('day_of_week', dow);
+        if (slots && slots.length > 0) {
+            const covered = slots.some(s =>
+                start_time >= s.start_time && end_time <= s.end_time
+            );
+            if (!covered) {
+                conflicts.push({
+                    type: 'outside_availability',
+                    message: `Visit falls outside caregiver's availability window for ${dow}.`
+                });
+            }
+        }
+        // No availability rows = no constraint; skip warning (admin may not have set it up yet)
+    }
+
+    if (window.DEBUG) console.log('[CareHub] checkScheduleConflicts result:', conflicts);
+    return conflicts;
+}
+
+/** @private Convert YYYY-MM-DD to day-of-week name */
+function _dateToDayOfWeek(dateStr) {
+    const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    return days[new Date(dateStr + 'T00:00:00').getDay()];
+}
+
+/** @private True if [s1,e1) overlaps [s2,e2) (HH:MM strings) */
+function _timesOverlap(s1, e1, s2, e2) {
+    return s1 < e2 && e1 > s2;
+}
+
+// ==================== AVAILABILITY MATCHING ====================
+
+/**
+ * Return active caregivers that are likely available for a proposed visit,
+ * ranked by match quality.
+ *
+ * Match criteria (in order of weight):
+ *   1. Has an availability slot covering the visit day + time window
+ *   2. Not on an unavailable date
+ *   3. Not already booked at that time
+ *   4. Service area matches client city (loose text match)
+ *   5. Has transportation if client city differs from caregiver city
+ *
+ * @param {Object} proposed
+ * @param {string} proposed.date
+ * @param {string} proposed.start_time
+ * @param {string} proposed.end_time
+ * @param {string} [proposed.client_city]
+ * @returns {Promise<Array<{caregiver, score, reasons}>>}
+ */
+async function getAvailableCaregivers(proposed) {
+    if (!supabaseClient) return [];
+    const { date, start_time, end_time, client_city } = proposed;
+    const dow = _dateToDayOfWeek(date);
+
+    // Fetch all active caregivers
+    const { data: caregivers } = await supabaseClient
+        .from(TABLES.CAREGIVERS)
+        .select('id, name, email, city, transportation, willing_outings, availability, status')
+        .eq('status', 'active');
+    if (!caregivers || caregivers.length === 0) return [];
+
+    const cgIds = caregivers.map(c => c.id);
+
+    // Parallel fetch: availability, unavailable dates, existing bookings on that date
+    const [availSlots, unavailRows, bookedRows] = await Promise.all([
+        supabaseClient
+            .from(TABLES.CAREGIVER_AVAILABILITY)
+            .select('caregiver_id, start_time, end_time, service_area')
+            .in('caregiver_id', cgIds)
+            .eq('day_of_week', dow)
+            .then(r => r.data || []),
+        supabaseClient
+            .from(TABLES.CAREGIVER_UNAVAILABLE_DATES)
+            .select('caregiver_id')
+            .in('caregiver_id', cgIds)
+            .eq('date', date)
+            .then(r => r.data || []),
+        supabaseClient
+            .from(TABLES.SCHEDULES)
+            .select('caregiver_id, start_time, end_time')
+            .in('caregiver_id', cgIds)
+            .eq('date', date)
+            .not('status', 'eq', 'cancelled')
+            .then(r => r.data || [])
+    ]);
+
+    const unavailSet = new Set(unavailRows.map(r => r.caregiver_id));
+
+    const results = [];
+    for (const cg of caregivers) {
+        const reasons = [];
+        let score = 0;
+
+        // Hard block: unavailable date
+        if (unavailSet.has(cg.id)) {
+            reasons.push({ type: 'block', text: 'Marked unavailable on this date' });
+            results.push({ caregiver: cg, score: -1, reasons, blocked: true });
+            continue;
+        }
+
+        // Hard block: already booked at that time
+        const alreadyBooked = bookedRows
+            .filter(b => b.caregiver_id === cg.id)
+            .some(b => _timesOverlap(start_time, end_time, b.start_time, b.end_time));
+        if (alreadyBooked) {
+            reasons.push({ type: 'block', text: 'Already booked at this time' });
+            results.push({ caregiver: cg, score: -1, reasons, blocked: true });
+            continue;
+        }
+
+        // Availability slot covers the window
+        const mySlots = availSlots.filter(s => s.caregiver_id === cg.id);
+        if (mySlots.length > 0) {
+            const covered = mySlots.some(s =>
+                start_time >= s.start_time && end_time <= s.end_time
+            );
+            if (covered) {
+                score += 40;
+                reasons.push({ type: 'good', text: `Available ${dow}` });
+            } else {
+                score += 10;
+                reasons.push({ type: 'warn', text: `Has ${dow} availability but time window extends outside it` });
+            }
+        } else {
+            reasons.push({ type: 'info', text: 'No structured availability set — may still be available' });
+        }
+
+        // Service area match
+        if (client_city && mySlots.some(s => s.service_area && s.service_area.toLowerCase().includes(client_city.toLowerCase()))) {
+            score += 20;
+            reasons.push({ type: 'good', text: 'Serves this area' });
+        } else if (client_city && cg.city && cg.city.toLowerCase().includes(client_city.toLowerCase())) {
+            score += 10;
+            reasons.push({ type: 'good', text: 'Same city as client' });
+        }
+
+        // Transportation
+        if (cg.transportation) {
+            score += 10;
+            reasons.push({ type: 'good', text: 'Has transportation' });
+        }
+
+        results.push({ caregiver: cg, score, reasons, blocked: false });
+    }
+
+    // Sort: unblocked first, then by score desc, then alphabetically
+    results.sort((a, b) => {
+        if (a.blocked !== b.blocked) return a.blocked ? 1 : -1;
+        if (b.score !== a.score) return b.score - a.score;
+        return (a.caregiver.name || '').localeCompare(b.caregiver.name || '');
+    });
+
+    if (window.DEBUG) console.log('[CareHub] getAvailableCaregivers:', results.length, 'results for', date, start_time, '-', end_time);
+    return results;
+}
+
+// ==================== RECURRING VISIT GENERATOR ====================
+
+/**
+ * Create a series of recurring schedule entries from a single template.
+ * Returns { created: number, errors: number }.
+ *
+ * @param {Object} template   – same shape as createSchedule() input + recurrence fields
+ * @param {string} template.recurrence_rule        – 'daily'|'weekly'|'bi-weekly'|'monthly'
+ * @param {string} template.recurrence_end_date    – YYYY-MM-DD
+ * @returns {Promise<{created: number, errors: number, parentId: string|null}>}
+ */
+async function createRecurringSchedules(template) {
+    if (!supabaseClient) return { created: 0, errors: 0, parentId: null };
+
+    const { recurrence_rule, recurrence_end_date, ...baseSchedule } = template;
+    if (!recurrence_rule || !recurrence_end_date) {
+        // Not actually recurring — fall through to single create
+        const single = await createSchedule(baseSchedule);
+        return { created: single ? 1 : 0, errors: single ? 0 : 1, parentId: single?.id || null };
+    }
+
+    const stepDays = { daily: 1, weekly: 7, 'bi-weekly': 14, monthly: null };
+    const endDate  = new Date(recurrence_end_date + 'T00:00:00');
+    let   current  = new Date(baseSchedule.date + 'T00:00:00');
+    let   parentId = null;
+    let   created  = 0;
+    let   errors   = 0;
+
+    while (current <= endDate) {
+        const dateStr = current.toISOString().split('T')[0];
+        const row = {
+            ...baseSchedule,
+            date:                  dateStr,
+            is_recurring:          true,
+            recurrence_rule,
+            recurrence_end_date,
+            recurrence_parent_id:  parentId
+        };
+
+        const result = await createSchedule(row);
+        if (result) {
+            if (!parentId) parentId = result.id;
+            created++;
+        } else {
+            errors++;
+        }
+
+        // Advance date
+        if (recurrence_rule === 'monthly') {
+            current.setMonth(current.getMonth() + 1);
+        } else {
+            current.setDate(current.getDate() + stepDays[recurrence_rule]);
+        }
+    }
+
+    if (window.DEBUG) console.log('[CareHub] createRecurringSchedules:', created, 'created,', errors, 'errors. parentId:', parentId);
+    return { created, errors, parentId };
+}
+
+// ==================== TRAINING HUB ====================
+
+async function getTrainingModules({ activeOnly = true } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient.from(TABLES.TRAINING_MODULES).select('*').order('sort_order').order('created_at');
+    if (activeOnly) q = q.eq('is_active', true);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getTrainingModules error:', error.message); return []; }
+    return data || [];
+}
+
+async function createTrainingModule(mod) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient.from(TABLES.TRAINING_MODULES).insert([{ ...mod, created_at: new Date().toISOString() }]).select().single();
+    if (error) { console.error('[CareHub] createTrainingModule error:', error.message); return null; }
+    return data;
+}
+
+async function updateTrainingModule(id, updates) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.TRAINING_MODULES).update({ ...updates, updated_at: new Date().toISOString() }).eq('id', id);
+    if (error) { console.error('[CareHub] updateTrainingModule error:', error.message); return false; }
+    return true;
+}
+
+async function deleteTrainingModule(id) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.TRAINING_MODULES).delete().eq('id', id);
+    if (error) { console.error('[CareHub] deleteTrainingModule error:', error.message); return false; }
+    return true;
+}
+
+async function getTrainingAssignments({ caregiverId = null, moduleId = null, status = null } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient
+        .from(TABLES.TRAINING_ASSIGNMENTS)
+        .select('*, training_modules(*), caregivers(id, name, email)')
+        .order('assigned_at', { ascending: false });
+    if (caregiverId) q = q.eq('caregiver_id', caregiverId);
+    if (moduleId)    q = q.eq('module_id', moduleId);
+    if (status)      q = q.eq('status', status);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getTrainingAssignments error:', error.message); return []; }
+    return data || [];
+}
+
+async function assignTrainingModule({ moduleId, caregiverId, assignedBy = null, dueDate = null, notes = null }) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.TRAINING_ASSIGNMENTS)
+        .upsert([{
+            module_id: moduleId, caregiver_id: caregiverId,
+            assigned_by: assignedBy, due_date: dueDate, notes,
+            status: 'assigned', assigned_at: new Date().toISOString()
+        }], { onConflict: 'module_id,caregiver_id' })
+        .select().single();
+    if (error) { console.error('[CareHub] assignTrainingModule error:', error.message); return null; }
+    return data;
+}
+
+async function updateTrainingAssignment(id, updates) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.TRAINING_ASSIGNMENTS).update(updates).eq('id', id);
+    if (error) { console.error('[CareHub] updateTrainingAssignment error:', error.message); return false; }
+    return true;
+}
+
+async function markTrainingComplete(id) {
+    if (!supabaseClient) return false;
+    const now = new Date().toISOString();
+    const { error } = await supabaseClient.from(TABLES.TRAINING_ASSIGNMENTS)
+        .update({ status: 'completed', completed_at: now }).eq('id', id);
+    if (error) { console.error('[CareHub] markTrainingComplete error:', error.message); return false; }
+    return true;
+}
+
+async function acknowledgeTraining(id) {
+    if (!supabaseClient) return false;
+    const now = new Date().toISOString();
+    const { error } = await supabaseClient.from(TABLES.TRAINING_ASSIGNMENTS)
+        .update({ acknowledged_at: now, status: 'completed', completed_at: now }).eq('id', id);
+    if (error) { console.error('[CareHub] acknowledgeTraining error:', error.message); return false; }
+    return true;
+}
+
+async function getOnboardingChecklist(caregiverId) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient.from(TABLES.ONBOARDING_CHECKLIST)
+        .select('*').eq('caregiver_id', caregiverId).single();
+    if (error && error.code !== 'PGRST116') { console.error('[CareHub] getOnboardingChecklist error:', error.message); }
+    return data || null;
+}
+
+async function upsertOnboardingChecklist(caregiverId, updates) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.ONBOARDING_CHECKLIST)
+        .upsert([{ caregiver_id: caregiverId, ...updates, updated_at: new Date().toISOString() }],
+                { onConflict: 'caregiver_id' });
+    if (error) { console.error('[CareHub] upsertOnboardingChecklist error:', error.message); return false; }
+    return true;
+}
+
+async function getAllOnboardingChecklists() {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient.from(TABLES.ONBOARDING_CHECKLIST)
+        .select('*, caregivers(id, name, email, status)').order('created_at');
+    if (error) { console.error('[CareHub] getAllOnboardingChecklists error:', error.message); return []; }
+    return data || [];
+}
+
+async function getCaregiverResources({ category = null, activeOnly = true } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient.from(TABLES.CAREGIVER_RESOURCES).select('*').order('is_pinned', { ascending: false }).order('sort_order').order('created_at');
+    if (activeOnly) q = q.eq('is_active', true);
+    if (category)   q = q.eq('category', category);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getCaregiverResources error:', error.message); return []; }
+    return data || [];
+}
+
+async function createCaregiverResource(resource) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_RESOURCES)
+        .insert([{ ...resource, created_at: new Date().toISOString() }]).select().single();
+    if (error) { console.error('[CareHub] createCaregiverResource error:', error.message); return null; }
+    return data;
+}
+
+async function updateCaregiverResource(id, updates) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_RESOURCES)
+        .update({ ...updates, updated_at: new Date().toISOString() }).eq('id', id);
+    if (error) { console.error('[CareHub] updateCaregiverResource error:', error.message); return false; }
+    return true;
+}
+
+async function deleteCaregiverResource(id) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_RESOURCES).delete().eq('id', id);
+    if (error) { console.error('[CareHub] deleteCaregiverResource error:', error.message); return false; }
+    return true;
+}
+
 // Export for use in other modules
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
@@ -2127,7 +2828,39 @@ if (typeof module !== 'undefined' && module.exports) {
         createPayrollExport,
         getDashboardStats,
         getUnreadNotifications,
+        getNotifications,
+        getNotificationCount,
         createNotification,
-        getSchedulesForMonth
+        markNotificationRead,
+        markAllNotificationsRead,
+        deleteNotification,
+        getSchedulesForMonth,
+        getClientSchedulePreferences,
+        saveClientSchedulePreferences,
+        getCaregiverAvailability,
+        getCaregiverAvailabilityBulk,
+        saveCaregiverAvailability,
+        getCaregiverUnavailableDates,
+        addCaregiverUnavailableDate,
+        removeCaregiverUnavailableDate,
+        checkScheduleConflicts,
+        getAvailableCaregivers,
+        createRecurringSchedules,
+        getTrainingModules,
+        createTrainingModule,
+        updateTrainingModule,
+        deleteTrainingModule,
+        getTrainingAssignments,
+        assignTrainingModule,
+        updateTrainingAssignment,
+        markTrainingComplete,
+        acknowledgeTraining,
+        getOnboardingChecklist,
+        upsertOnboardingChecklist,
+        getAllOnboardingChecklists,
+        getCaregiverResources,
+        createCaregiverResource,
+        updateCaregiverResource,
+        deleteCaregiverResource
     };
 }

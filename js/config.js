@@ -29,7 +29,14 @@ window.TABLES = {
   SCHEDULES: "schedules",
   TIMESHEETS: "timesheets",
   VISIT_UPDATES: "visit_updates",
-  PAYROLL_EXPORTS: "payroll_exports"
+  PAYROLL_EXPORTS: "payroll_exports",
+  CLIENT_SCHEDULE_PREFERENCES: "client_schedule_preferences",
+  CAREGIVER_AVAILABILITY: "caregiver_availability",
+  CAREGIVER_UNAVAILABLE_DATES: "caregiver_unavailable_dates",
+  TRAINING_MODULES: "training_modules",
+  TRAINING_ASSIGNMENTS: "training_assignments",
+  ONBOARDING_CHECKLIST: "onboarding_checklist",
+  CAREGIVER_RESOURCES: "caregiver_resources"
 };
 
 // =============================================================================
@@ -102,10 +109,10 @@ window.ROLE_LABELS = {
 // Navigation visibility by role
 // Each role array lists the pages they can see
 window.NAV_VISIBILITY = {
-  [window.ROLES.ADMIN_OWNER]: ['dashboard', 'applications', 'care-requests', 'caregivers', 'clients', 'schedules', 'timesheets', 'visit-updates', 'settings'],
-  [window.ROLES.CO_OWNER]: ['dashboard', 'applications', 'care-requests', 'caregivers', 'clients', 'schedules', 'timesheets', 'visit-updates', 'settings'],
-  [window.ROLES.CAREGIVER]: ['dashboard', 'schedules', 'timesheets', 'visit-updates', 'clients', 'settings'],
-  [window.ROLES.CLIENT_FAMILY]: ['dashboard', 'schedules', 'visit-updates', 'settings']
+  [window.ROLES.ADMIN_OWNER]: ['dashboard', 'applications', 'care-requests', 'caregivers', 'clients', 'schedules', 'timesheets', 'visit-updates', 'training-hub', 'notifications', 'settings'],
+  [window.ROLES.CO_OWNER]: ['dashboard', 'applications', 'care-requests', 'caregivers', 'clients', 'schedules', 'timesheets', 'visit-updates', 'training-hub', 'notifications', 'settings'],
+  [window.ROLES.CAREGIVER]: ['dashboard', 'schedules', 'timesheets', 'visit-updates', 'clients', 'training-hub', 'notifications', 'settings'],
+  [window.ROLES.CLIENT_FAMILY]: ['dashboard', 'schedules', 'visit-updates', 'notifications', 'settings']
 };
 
 // Role-based dashboard feature visibility
@@ -205,6 +212,8 @@ window.NAV_ITEMS = [
   { id: 'schedules', label: 'Schedules', icon: 'ph-calendar' },
   { id: 'timesheets', label: 'Timesheets', icon: 'ph-clock' },
   { id: 'visit-updates', label: 'Visit Updates', icon: 'ph-clipboard-text' },
+  { id: 'training-hub', label: 'Training Hub', icon: 'ph-graduation-cap' },
+  { id: 'notifications', label: 'Notifications', icon: 'ph-bell' },
   { id: 'settings', label: 'Settings', icon: 'ph-gear' }
 ];
 

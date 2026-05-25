@@ -68,6 +68,14 @@
                     <i class="ph ph-clipboard-text"></i>
                     <span>Visit Updates</span>
                 </button>
+                <button class="nav-item" data-page="training-hub" data-roles="admin_owner,co_owner,caregiver">
+                    <i class="ph ph-graduation-cap"></i>
+                    <span>Training Hub</span>
+                </button>
+                <button class="nav-item" data-page="notifications" data-roles="admin_owner,co_owner,caregiver,client_family">
+                    <i class="ph ph-bell"></i>
+                    <span>Notifications</span>
+                </button>
                 <button class="nav-item" data-page="settings" data-roles="admin_owner,co_owner,caregiver,client_family">
                     <i class="ph ph-gear"></i>
                     <span>Settings</span>
@@ -83,6 +91,11 @@
                         <div class="user-name" id="userName">Admin User</div>
                         <div class="user-role" id="userRole">Admin/Owner</div>
                     </div>
+                    <!-- Notification bell (dropdown portal created by JS on document.body) -->
+                    <button class="notif-bell-btn" id="notif-bell-btn" onclick="CareHubNotifications.toggleDropdown()" title="Notifications" aria-label="Notifications" style="margin-left:auto;flex-shrink:0;">
+                        <i class="ph ph-bell"></i>
+                        <span class="notif-badge" id="notif-badge" style="display:none;"></span>
+                    </button>
                 </div>
                 <button class="logout-btn" id="logoutBtn">
                     <i class="ph ph-sign-out"></i>

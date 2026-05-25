@@ -67,7 +67,12 @@ function initApp() {
     
     // Load initial page
     loadPage('dashboard');
-    
+
+    // Init notification bell badge
+    setTimeout(() => {
+        if (window.CareHubNotifications) window.CareHubNotifications.refresh();
+    }, 1500);
+
     if (DEBUG) console.log('[CareHub] Operating system initialized');
 }
 
@@ -285,6 +290,12 @@ function loadPage(page) {
             break;
         case 'settings':
             renderSettings();
+            break;
+        case 'notifications':
+            renderNotifications();
+            break;
+        case 'training-hub':
+            renderTrainingHub();
             break;
         default:
             renderDashboard();
@@ -2227,7 +2238,12 @@ async function renderSchedules() {
         <div class="card schedule-card">
             <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
                 <span class="card-title">Visits</span>
-                <button class="btn btn-success" onclick="openCreateScheduleModal()">+ New Visit</button>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-secondary" onclick="renderScheduleBuilder()">
+                        <i class="ph ph-magic-wand"></i> Schedule Builder
+                    </button>
+                    <button class="btn btn-success" onclick="openCreateScheduleModal()">+ New Visit</button>
+                </div>
             </div>
             <div class="card-body" id="schedulesContainer">
                 <div class="loading-state">
@@ -3302,6 +3318,12 @@ async function sendCaregiverInvite(caregiverId) {
         if (invite.success) {
             await updateCaregiverAccountStatus(cg.id, 'invite_sent');
             CareHubToast.success(`Portal invite sent to ${cg.email}.`);
+            await createNotification({
+                type: 'invite_sent', title: 'Portal Invite Sent',
+                message: `A portal invite was sent to ${cg.email}.`,
+                caregiver_id: cg.id, recipient_role: 'admin_owner', priority: 'normal',
+                related_table: 'caregivers', related_record_id: cg.id
+            });
         } else if (invite.code === 'RATE_LIMIT') {
             CareHubToast.warning('Too many email links were sent. Please wait before retrying.');
             restoreBtns();
@@ -3318,6 +3340,12 @@ async function sendCaregiverInvite(caregiverId) {
         if (invite.pending) {
             await updateCaregiverAccountStatus(cg.id, 'pending_invite');
             CareHubToast.warning(`Invite queued for ${cg.email}. No email will be sent until the Edge Function is deployed.`);
+            await createNotification({
+                type: 'invite_queued', title: 'Portal Invite Queued',
+                message: `Invite queued for ${cg.email}. Edge Function not yet deployed.`,
+                caregiver_id: cg.id, recipient_role: 'admin_owner', priority: 'low',
+                related_table: 'caregivers', related_record_id: cg.id
+            });
         } else if (invite.code === 'EMAIL_EXISTS') {
             CareHubToast.info(`An invite for ${cg.email} is already queued.`);
         } else if (invite.code === 'INSERT_FAILED') {
@@ -4222,6 +4250,682 @@ async function saveClientEdit(id) {
     }
 }
 
+// ==================== SCHEDULE BUILDER ====================
+
+/**
+ * Render the Schedule Builder sub-page inside the Schedules view.
+ * Shows: client needs panel, caregiver availability panel, suggested matches, conflict panel.
+ * Admin/co-owner only.
+ */
+async function renderScheduleBuilder() {
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
+    if (role !== 'admin_owner' && role !== 'co_owner') {
+        CareHubToast.error('Schedule Builder is available to admins only.');
+        return;
+    }
+
+    const [clients, caregivers] = await Promise.all([
+        getClients({ status: 'active' }),
+        getCaregivers({ status: 'active' })
+    ]);
+
+    mainContent.innerHTML = `
+        <div class="page-header animate-fade-in">
+            <h1>Schedule Builder</h1>
+            <p>Match client care needs with caregiver availability</p>
+        </div>
+
+        <div class="sb-layout">
+            <!-- LEFT: Client needs panel -->
+            <div class="sb-panel">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title"><i class="ph ph-users"></i> Client Care Needs</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label>Select Client</label>
+                            <select id="sb-client-select" class="form-select" onchange="loadClientPrefs(this.value)">
+                                <option value="">-- Select a client --</option>
+                                ${clients.map(c => `<option value="${c.id}" data-city="${escapeHtml(c.city || '')}">${escapeHtml(c.care_for || c.name || 'N/A')}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div id="sb-client-prefs" style="margin-top:var(--spacing-md);">
+                            <div class="empty-state" style="padding:var(--spacing-lg) 0;">
+                                <p style="color:var(--warm-muted);font-size:13px;">Select a client to view their care schedule preferences.</p>
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" id="sb-edit-prefs-btn" style="display:none;margin-top:var(--spacing-sm);" onclick="openClientSchedulePrefsModal()">
+                            <i class="ph ph-pencil"></i> Edit Preferences
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CENTER: Visit parameters + conflict panel -->
+            <div class="sb-panel sb-panel--center">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title"><i class="ph ph-calendar-plus"></i> Visit Parameters</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Date <span class="required">*</span></label>
+                                <input type="date" id="sb-date" class="form-input" oninput="refreshSuggestedCaregivers()">
+                            </div>
+                            <div class="form-group">
+                                <label>Service Type</label>
+                                <input type="text" id="sb-service-type" class="form-input" placeholder="Personal Care, Companionship…">
+                            </div>
+                        </div>
+                        <div class="form-grid" style="margin-top:var(--spacing-sm);">
+                            <div class="form-group">
+                                <label>Start Time <span class="required">*</span></label>
+                                <input type="time" id="sb-start" class="form-input" oninput="refreshSuggestedCaregivers()">
+                            </div>
+                            <div class="form-group">
+                                <label>End Time <span class="required">*</span></label>
+                                <input type="time" id="sb-end" class="form-input" oninput="refreshSuggestedCaregivers()">
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-top:var(--spacing-sm);">
+                            <label>Location</label>
+                            <input type="text" id="sb-location" class="form-input" placeholder="Client address or visit location">
+                        </div>
+                        <div class="form-group">
+                            <label>Notes</label>
+                            <textarea id="sb-notes" class="form-textarea" rows="2" placeholder="Special instructions…"></textarea>
+                        </div>
+
+                        <!-- Recurring -->
+                        <div class="form-group" style="margin-top:var(--spacing-md);">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input type="checkbox" id="sb-recurring" onchange="toggleRecurringFields()" style="width:auto;">
+                                <span>Recurring Visit</span>
+                            </label>
+                        </div>
+                        <div id="sb-recurring-fields" style="display:none;">
+                            <div class="form-grid">
+                                <div class="form-group">
+                                    <label>Repeat</label>
+                                    <select id="sb-recur-rule" class="form-select">
+                                        <option value="weekly">Weekly</option>
+                                        <option value="bi-weekly">Bi-weekly</option>
+                                        <option value="daily">Daily</option>
+                                        <option value="monthly">Monthly</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>End Date <span class="required">*</span></label>
+                                    <input type="date" id="sb-recur-end" class="form-input">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Conflict panel -->
+                        <div id="sb-conflict-panel" style="display:none; margin-top:var(--spacing-md);"></div>
+
+                        <div style="margin-top:var(--spacing-md); display:flex; gap:var(--spacing-sm);">
+                            <button class="btn btn-success" id="sb-create-btn" onclick="scheduleBuilderCreateVisit()" disabled>
+                                <i class="ph ph-calendar-check"></i> Create Visit
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="checkBuilderConflicts()">
+                                <i class="ph ph-warning"></i> Check Conflicts
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT: Suggested caregivers panel -->
+            <div class="sb-panel">
+                <div class="card">
+                    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                        <span class="card-title"><i class="ph ph-stethoscope"></i> Suggested Caregivers</span>
+                        <button class="btn btn-secondary btn-sm" onclick="refreshSuggestedCaregivers()">
+                            <i class="ph ph-arrows-clockwise"></i> Refresh
+                        </button>
+                    </div>
+                    <div id="sb-suggestions" class="card-body">
+                        <div class="empty-state" style="padding:var(--spacing-lg) 0;">
+                            <p style="color:var(--warm-muted);font-size:13px;">Enter date and time above to see available caregivers.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Caregiver availability editor -->
+                <div class="card" style="margin-top:var(--spacing-md);">
+                    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                        <span class="card-title"><i class="ph ph-clock"></i> Caregiver Availability</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label>Select Caregiver</label>
+                            <select id="sb-cg-select" class="form-select" onchange="loadCaregiverAvailabilityPanel(this.value)">
+                                <option value="">-- Select a caregiver --</option>
+                                ${caregivers.map(cg => `<option value="${cg.id}">${escapeHtml(cg.name)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div id="sb-cg-avail" style="margin-top:var(--spacing-sm);"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+/** Toggle recurring fields visibility */
+function toggleRecurringFields() {
+    const cb = document.getElementById('sb-recurring');
+    const fields = document.getElementById('sb-recurring-fields');
+    if (cb && fields) fields.style.display = cb.checked ? '' : 'none';
+}
+
+/**
+ * Load client schedule preferences into the builder left panel.
+ * @param {string} clientId
+ */
+async function loadClientPrefs(clientId) {
+    const panel = document.getElementById('sb-client-prefs');
+    const editBtn = document.getElementById('sb-edit-prefs-btn');
+    if (!panel) return;
+
+    if (!clientId) {
+        panel.innerHTML = '<p style="color:var(--warm-muted);font-size:13px;">Select a client to view their care schedule preferences.</p>';
+        if (editBtn) editBtn.style.display = 'none';
+        return;
+    }
+
+    panel.innerHTML = '<div class="spinner" style="width:24px;height:24px;"></div>';
+    const prefs = await getClientSchedulePreferences(clientId);
+
+    if (!prefs) {
+        panel.innerHTML = `
+            <p style="color:var(--warm-muted);font-size:13px;">No schedule preferences set for this client.</p>
+            <button class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="openClientSchedulePrefsModal('${clientId}')">
+                <i class="ph ph-plus"></i> Set Preferences
+            </button>`;
+        if (editBtn) editBtn.style.display = 'none';
+        return;
+    }
+
+    const days = (prefs.preferred_days || []).join(', ') || '—';
+    panel.innerHTML = `
+        <div class="detail-grid" style="gap:8px;">
+            <div class="detail-item"><div class="detail-label">Preferred Days</div><div class="detail-value">${escapeHtml(days)}</div></div>
+            <div class="detail-item"><div class="detail-label">Preferred Time</div><div class="detail-value">${prefs.preferred_start || '—'} – ${prefs.preferred_end || '—'}</div></div>
+            <div class="detail-item"><div class="detail-label">Visit Length</div><div class="detail-value">${prefs.visit_length_hours ? prefs.visit_length_hours + ' hrs' : '—'}</div></div>
+            <div class="detail-item"><div class="detail-label">Frequency</div><div class="detail-value">${escapeHtml(prefs.frequency || '—')}</div></div>
+            <div class="detail-item"><div class="detail-label">Service Type</div><div class="detail-value">${escapeHtml(prefs.service_type || '—')}</div></div>
+            <div class="detail-item"><div class="detail-label">Start Date</div><div class="detail-value">${prefs.start_date ? formatDate(prefs.start_date) : '—'}</div></div>
+            <div class="detail-item"><div class="detail-label">Recurring</div><div class="detail-value">${prefs.is_recurring ? 'Yes' : 'One-time'}</div></div>
+            ${prefs.notes ? `<div class="detail-item" style="grid-column:1/-1;"><div class="detail-label">Notes</div><div class="detail-value">${escapeHtml(prefs.notes)}</div></div>` : ''}
+        </div>`;
+
+    if (editBtn) {
+        editBtn.style.display = '';
+        editBtn.onclick = () => openClientSchedulePrefsModal(clientId);
+    }
+
+    // Auto-populate builder fields from prefs
+    const dateEl = document.getElementById('sb-date');
+    if (dateEl && !dateEl.value && prefs.start_date) dateEl.value = prefs.start_date;
+    const startEl = document.getElementById('sb-start');
+    if (startEl && !startEl.value && prefs.preferred_start) startEl.value = prefs.preferred_start;
+    const endEl = document.getElementById('sb-end');
+    if (endEl && !endEl.value && prefs.preferred_end) endEl.value = prefs.preferred_end;
+    const svcEl = document.getElementById('sb-service-type');
+    if (svcEl && !svcEl.value && prefs.service_type) svcEl.value = prefs.service_type;
+}
+
+/**
+ * Load and display a caregiver's availability + unavailable dates in the right panel.
+ * @param {string} caregiverId
+ */
+async function loadCaregiverAvailabilityPanel(caregiverId) {
+    const panel = document.getElementById('sb-cg-avail');
+    if (!panel || !caregiverId) { if (panel) panel.innerHTML = ''; return; }
+
+    panel.innerHTML = '<div class="spinner" style="width:24px;height:24px;"></div>';
+    const [slots, blocked] = await Promise.all([
+        getCaregiverAvailability(caregiverId),
+        getCaregiverUnavailableDates(caregiverId)
+    ]);
+
+    const DOW_ORDER = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    const slotRows = DOW_ORDER.map(day => {
+        const daySlots = slots.filter(s => s.day_of_week === day);
+        if (daySlots.length === 0) return `<tr><td style="color:var(--warm-muted);">${day}</td><td style="color:var(--warm-muted);">—</td></tr>`;
+        return daySlots.map(s => `<tr><td><strong>${day}</strong></td><td>${s.start_time} – ${s.end_time}${s.service_area ? ' <span style="color:var(--warm-muted);font-size:12px;">(' + escapeHtml(s.service_area) + ')</span>' : ''}</td></tr>`).join('');
+    }).join('');
+
+    const blockedHtml = blocked.length === 0
+        ? '<p style="color:var(--warm-muted);font-size:12px;">None</p>'
+        : blocked.slice(0, 10).map(b => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border-light);">
+                <span>${formatDate(b.date)}${b.reason ? ' — ' + escapeHtml(b.reason) : ''}</span>
+                <button class="btn btn-sm btn-danger" style="padding:2px 8px;font-size:11px;" onclick="removeCaregiverUnavailableDateUI('${caregiverId}','${b.date}')">✕</button>
+            </div>`).join('');
+
+    panel.innerHTML = `
+        <div style="font-size:13px;">
+            <div style="font-weight:600;margin-bottom:6px;">Weekly Availability</div>
+            <table class="data-table" style="font-size:12px;">
+                <tbody>${slotRows}</tbody>
+            </table>
+            <div style="margin-top:10px;display:flex;gap:6px;">
+                <button class="btn btn-secondary btn-sm" onclick="openCaregiverAvailabilityModal('${caregiverId}')">
+                    <i class="ph ph-pencil"></i> Edit Availability
+                </button>
+            </div>
+            <div style="font-weight:600;margin-top:12px;margin-bottom:4px;">Unavailable Dates</div>
+            ${blockedHtml}
+            <div style="margin-top:8px;display:flex;gap:6px;align-items:center;">
+                <input type="date" id="sb-block-date" class="form-input" style="font-size:12px;padding:4px 8px;flex:1;">
+                <input type="text" id="sb-block-reason" class="form-input" style="font-size:12px;padding:4px 8px;flex:2;" placeholder="Reason (optional)">
+                <button class="btn btn-sm btn-danger" style="white-space:nowrap;" onclick="addCaregiverUnavailableDateUI('${caregiverId}')">Block</button>
+            </div>
+        </div>`;
+}
+
+/** Add a blocked date from the builder panel */
+async function addCaregiverUnavailableDateUI(caregiverId) {
+    const date   = document.getElementById('sb-block-date')?.value;
+    const reason = document.getElementById('sb-block-reason')?.value || '';
+    if (!date) { CareHubToast.warning('Please select a date to block.'); return; }
+    const ok = await addCaregiverUnavailableDate(caregiverId, date, reason);
+    if (ok) {
+        CareHubToast.success('Date blocked.');
+        await loadCaregiverAvailabilityPanel(caregiverId);
+    } else {
+        CareHubToast.error('Failed to block date.');
+    }
+}
+
+/** Remove a blocked date from the builder panel */
+async function removeCaregiverUnavailableDateUI(caregiverId, date) {
+    const ok = await removeCaregiverUnavailableDate(caregiverId, date);
+    if (ok) {
+        CareHubToast.success('Date unblocked.');
+        await loadCaregiverAvailabilityPanel(caregiverId);
+    } else {
+        CareHubToast.error('Failed to unblock date.');
+    }
+}
+
+/**
+ * Refresh the suggested caregivers panel based on current builder inputs.
+ * Debounced so it doesn't fire on every keystroke.
+ */
+let _sbRefreshTimer = null;
+async function refreshSuggestedCaregivers() {
+    clearTimeout(_sbRefreshTimer);
+    _sbRefreshTimer = setTimeout(_doRefreshSuggestions, 400);
+}
+
+async function _doRefreshSuggestions() {
+    const date  = document.getElementById('sb-date')?.value;
+    const start = document.getElementById('sb-start')?.value;
+    const end   = document.getElementById('sb-end')?.value;
+    const panel = document.getElementById('sb-suggestions');
+    const createBtn = document.getElementById('sb-create-btn');
+    if (!panel) return;
+
+    if (!date || !start || !end) {
+        panel.innerHTML = '<p style="color:var(--warm-muted);font-size:13px;padding:var(--spacing-md) 0;">Enter date and time to see available caregivers.</p>';
+        if (createBtn) createBtn.disabled = true;
+        return;
+    }
+
+    panel.innerHTML = '<div class="spinner" style="width:24px;height:24px;"></div>';
+
+    const clientSelect = document.getElementById('sb-client-select');
+    const clientId = clientSelect?.value || null;
+    const clientCity = clientSelect?.selectedOptions[0]?.dataset.city || null;
+
+    const results = await getAvailableCaregivers({ date, start_time: start, end_time: end, client_city: clientCity });
+
+    if (createBtn) createBtn.disabled = !clientId;
+
+    if (results.length === 0) {
+        panel.innerHTML = '<p style="color:var(--warm-muted);font-size:13px;padding:var(--spacing-md) 0;">No active caregivers found.</p>';
+        return;
+    }
+
+    const REASON_ICON = { good: '✓', warn: '⚠', info: 'ℹ', block: '✕' };
+    const REASON_COLOR = { good: 'var(--status-approved,#16a34a)', warn: 'var(--warn,#d97706)', info: 'var(--warm-muted)', block: 'var(--status-denied,#dc2626)' };
+
+    panel.innerHTML = results.map(r => `
+        <div class="sb-suggestion ${r.blocked ? 'sb-suggestion--blocked' : ''}" onclick="${r.blocked ? '' : `selectSuggestedCaregiver('${r.caregiver.id}')`}" style="cursor:${r.blocked ? 'default' : 'pointer'};">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong style="${r.blocked ? 'color:var(--warm-muted);text-decoration:line-through;' : ''}">${escapeHtml(r.caregiver.name)}</strong>
+                ${!r.blocked ? `<span class="status-badge status-approved" style="font-size:11px;">Score ${r.score}</span>` : `<span class="status-badge status-denied" style="font-size:11px;">Unavailable</span>`}
+            </div>
+            <div style="margin-top:4px;font-size:12px;">
+                ${r.reasons.map(rs => `<span style="color:${REASON_COLOR[rs.type]};margin-right:8px;">${REASON_ICON[rs.type]} ${escapeHtml(rs.text)}</span>`).join('')}
+            </div>
+        </div>
+    `).join('');
+}
+
+/**
+ * Select a suggested caregiver — populates the caregiver dropdown in the create modal if open,
+ * or sets a hidden builder field and runs a conflict check.
+ */
+function selectSuggestedCaregiver(caregiverId) {
+    const cgSelect = document.getElementById('schedule-caregiver_id');
+    if (cgSelect) {
+        cgSelect.value = caregiverId;
+        cgSelect.dispatchEvent(new Event('change'));
+    }
+    window._sbSelectedCaregiverId = caregiverId;
+    checkBuilderConflicts();
+}
+
+/**
+ * Run a conflict check on the current builder form and display results in the conflict panel.
+ */
+async function checkBuilderConflicts() {
+    const date    = document.getElementById('sb-date')?.value;
+    const start   = document.getElementById('sb-start')?.value;
+    const end     = document.getElementById('sb-end')?.value;
+    const cgId    = window._sbSelectedCaregiverId || null;
+    const clId    = document.getElementById('sb-client-select')?.value || null;
+    const panel   = document.getElementById('sb-conflict-panel');
+    if (!panel) return;
+
+    if (!date || !start || !end) {
+        panel.style.display = 'none';
+        return;
+    }
+
+    const conflicts = await checkScheduleConflicts({
+        date, start_time: start, end_time: end,
+        caregiver_id: cgId || undefined,
+        client_id:    clId || undefined
+    });
+
+    if (conflicts.length === 0) {
+        panel.style.display = '';
+        panel.innerHTML = `<div style="background:var(--status-approved-bg,#dcfce7);border:1px solid var(--status-approved,#16a34a);border-radius:var(--radius-md);padding:10px 14px;font-size:13px;color:var(--status-approved,#16a34a);">
+            <i class="ph ph-check-circle"></i> No conflicts detected.
+        </div>`;
+    } else {
+        panel.style.display = '';
+        panel.innerHTML = `<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:var(--radius-md);padding:10px 14px;font-size:13px;">
+            <strong style="color:#dc2626;"><i class="ph ph-warning"></i> ${conflicts.length} conflict${conflicts.length > 1 ? 's' : ''} found:</strong>
+            <ul style="margin:6px 0 0 16px;color:#7f1d1d;">
+                ${conflicts.map(c => `<li>${escapeHtml(c.message)}</li>`).join('')}
+            </ul>
+            <p style="margin-top:8px;color:var(--warm-muted);font-size:12px;">You can still create the visit — conflicts are warnings only.</p>
+        </div>`;
+    }
+}
+
+/**
+ * Create a visit (or recurring series) from the Schedule Builder form.
+ */
+async function scheduleBuilderCreateVisit() {
+    const clientId  = document.getElementById('sb-client-select')?.value;
+    const cgId      = window._sbSelectedCaregiverId || null;
+    const date      = document.getElementById('sb-date')?.value;
+    const start     = document.getElementById('sb-start')?.value;
+    const end       = document.getElementById('sb-end')?.value;
+    const svcType   = document.getElementById('sb-service-type')?.value || '';
+    const location  = document.getElementById('sb-location')?.value || '';
+    const notes     = document.getElementById('sb-notes')?.value || '';
+    const recurring = document.getElementById('sb-recurring')?.checked;
+    const recurRule = document.getElementById('sb-recur-rule')?.value;
+    const recurEnd  = document.getElementById('sb-recur-end')?.value;
+
+    if (!clientId) { CareHubToast.warning('Please select a client.'); return; }
+    if (!date)     { CareHubToast.warning('Please enter a date.'); return; }
+    if (!start || !end) { CareHubToast.warning('Please enter start and end time.'); return; }
+    if (recurring && !recurEnd) { CareHubToast.warning('Please enter a recurrence end date.'); return; }
+
+    const btn = document.getElementById('sb-create-btn');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ph ph-circle-notch" style="animation:spin .8s linear infinite"></i> Creating…'; }
+
+    const template = {
+        client_id:    clientId,
+        caregiver_id: cgId || null,
+        date, start_time: start, end_time: end,
+        service_type: svcType, location, notes,
+        status: 'scheduled',
+        ...(recurring ? { recurrence_rule: recurRule, recurrence_end_date: recurEnd } : {})
+    };
+
+    let toastMsg;
+    if (recurring && recurRule && recurEnd) {
+        const { created, errors } = await createRecurringSchedules(template);
+        toastMsg = `${created} visit${created !== 1 ? 's' : ''} created${errors ? ' (' + errors + ' failed)' : ''}.`;
+        if (errors && !created) {
+            CareHubToast.error('Failed to create recurring visits. Check console for details.');
+        } else {
+            CareHubToast.success(toastMsg);
+        }
+    } else {
+        const result = await createSchedule(template);
+        if (result) {
+            CareHubToast.success('Visit created successfully.');
+            await createNotification({
+                type:         'schedule_created',
+                title:        'Visit Scheduled',
+                message:      `New visit scheduled for ${date} at ${start}.`,
+                related_id:   result.id,
+                related_type: 'schedule'
+            });
+        } else {
+            CareHubToast.error('Failed to create visit. Check console for details.');
+        }
+    }
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ph ph-calendar-check"></i> Create Visit'; }
+
+    window.CareHubRefreshCoordinator?.trigger('schedules', { immediate: true });
+}
+
+// ==================== CAREGIVER AVAILABILITY EDITOR MODAL ====================
+
+/**
+ * Open a modal for editing a caregiver's structured weekly availability.
+ * @param {string} caregiverId
+ */
+async function openCaregiverAvailabilityModal(caregiverId) {
+    if (!caregiverId) return;
+    const cg = await getCaregiverById(caregiverId);
+    if (!cg) { CareHubToast.error('Caregiver not found.'); return; }
+
+    const slots = await getCaregiverAvailability(caregiverId);
+    const DAYS  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+    const existingByDay = {};
+    slots.forEach(s => { existingByDay[s.day_of_week] = existingByDay[s.day_of_week] || []; existingByDay[s.day_of_week].push(s); });
+
+    const dayRows = DAYS.map(day => {
+        const s = (existingByDay[day] || [{}])[0];
+        return `
+        <tr>
+            <td style="font-size:13px;font-weight:500;min-width:100px;">${day}</td>
+            <td><input type="time" class="form-input avail-start" data-day="${day}" style="font-size:12px;padding:4px 8px;" value="${s.start_time || ''}"></td>
+            <td><input type="time" class="form-input avail-end"   data-day="${day}" style="font-size:12px;padding:4px 8px;" value="${s.end_time   || ''}"></td>
+            <td><input type="text" class="form-input avail-area"  data-day="${day}" style="font-size:12px;padding:4px 8px;" value="${escapeHtml(s.service_area || '')}" placeholder="Service area"></td>
+        </tr>`;
+    }).join('');
+
+    modalTitle.textContent = `Availability — ${cg.name}`;
+    modalBody.innerHTML = `
+        <p style="font-size:13px;color:var(--warm-muted);margin-bottom:var(--spacing-md);">
+            Leave start/end blank to mark a day as unavailable.
+        </p>
+        <div class="table-wrapper">
+            <table class="data-table" style="font-size:13px;">
+                <thead><tr><th>Day</th><th>Start</th><th>End</th><th>Service Area</th></tr></thead>
+                <tbody>${dayRows}</tbody>
+            </table>
+        </div>
+        <div class="form-group" style="margin-top:var(--spacing-md);">
+            <label>Max Hours / Week</label>
+            <input type="number" id="avail-max-hours" class="form-input" style="max-width:120px;" min="1" max="80" step="0.5" value="${slots[0]?.max_hours_week || ''}">
+        </div>
+        <input type="hidden" id="avail-caregiver-id" value="${caregiverId}">
+    `;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-success" onclick="saveCaregiverAvailabilityForm()">Save Availability</button>
+    `;
+    openModal();
+}
+
+/** Save caregiver availability from the modal form */
+async function saveCaregiverAvailabilityForm() {
+    const caregiverId = document.getElementById('avail-caregiver-id')?.value;
+    if (!caregiverId) return;
+
+    const maxHours = parseFloat(document.getElementById('avail-max-hours')?.value) || null;
+    const slots = [];
+    const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+    DAYS.forEach(day => {
+        const start = document.querySelector(`.avail-start[data-day="${day}"]`)?.value;
+        const end   = document.querySelector(`.avail-end[data-day="${day}"]`)?.value;
+        const area  = document.querySelector(`.avail-area[data-day="${day}"]`)?.value || '';
+        if (start && end) {
+            slots.push({ day_of_week: day, start_time: start, end_time: end, service_area: area, max_hours_week: maxHours });
+        }
+    });
+
+    const ok = await saveCaregiverAvailability(caregiverId, slots);
+    if (ok) {
+        CareHubToast.success('Availability saved.');
+        closeModal();
+        await loadCaregiverAvailabilityPanel(caregiverId);
+    } else {
+        CareHubToast.error('Failed to save availability. Check console for details.');
+    }
+}
+
+// ==================== CLIENT SCHEDULE PREFERENCES MODAL ====================
+
+/**
+ * Open a modal for editing client schedule preferences.
+ * @param {string} clientId
+ */
+async function openClientSchedulePrefsModal(clientId) {
+    if (!clientId) {
+        const sel = document.getElementById('sb-client-select');
+        clientId = sel?.value;
+    }
+    if (!clientId) { CareHubToast.warning('Please select a client first.'); return; }
+
+    const client = await getClientById(clientId);
+    if (!client) { CareHubToast.error('Client not found.'); return; }
+
+    const prefs = await getClientSchedulePreferences(clientId) || {};
+    const DAYS  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    const prefDays = prefs.preferred_days || [];
+
+    const dayChecks = DAYS.map(d => `
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;">
+            <input type="checkbox" name="pref-day" value="${d}" ${prefDays.includes(d) ? 'checked' : ''} style="width:auto;">
+            ${d}
+        </label>`).join('');
+
+    modalTitle.textContent = `Schedule Preferences — ${escapeHtml(client.care_for || client.name || 'Client')}`;
+    modalBody.innerHTML = `
+        <div class="edit-form">
+            <input type="hidden" id="prefs-client-id" value="${clientId}">
+            <div class="detail-section">
+                <h4>Preferred Visit Days</h4>
+                <div style="display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:8px;">${dayChecks}</div>
+            </div>
+            <div class="detail-section">
+                <h4>Preferred Time Window</h4>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Start Time</label>
+                        <input type="time" id="prefs-start" class="form-input" value="${prefs.preferred_start || ''}">
+                    </div>
+                    <div class="form-group">
+                        <label>End Time</label>
+                        <input type="time" id="prefs-end" class="form-input" value="${prefs.preferred_end || ''}">
+                    </div>
+                </div>
+            </div>
+            <div class="detail-section">
+                <h4>Visit Details</h4>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Visit Length (hours)</label>
+                        <input type="number" id="prefs-length" class="form-input" min="0.5" max="24" step="0.5" value="${prefs.visit_length_hours || ''}">
+                    </div>
+                    <div class="form-group">
+                        <label>Frequency</label>
+                        <select id="prefs-frequency" class="form-select">
+                            <option value="">— Select —</option>
+                            ${['daily','weekly','bi-weekly','monthly','as-needed'].map(f =>
+                                `<option value="${f}" ${prefs.frequency === f ? 'selected' : ''}>${f.charAt(0).toUpperCase() + f.slice(1)}</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Service Type</label>
+                        <input type="text" id="prefs-service" class="form-input" value="${escapeHtml(prefs.service_type || '')}" placeholder="Personal Care, Companionship…">
+                    </div>
+                    <div class="form-group">
+                        <label>Requested Start Date</label>
+                        <input type="date" id="prefs-startdate" class="form-input" value="${prefs.start_date || ''}">
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top:var(--spacing-sm);">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="prefs-recurring" style="width:auto;" ${prefs.is_recurring !== false ? 'checked' : ''}>
+                        <span>Recurring (ongoing schedule)</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>Notes / Preferences</label>
+                    <textarea id="prefs-notes" class="form-textarea" rows="3">${escapeHtml(prefs.notes || '')}</textarea>
+                </div>
+            </div>
+        </div>
+    `;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-success" onclick="saveClientSchedulePrefsForm()">Save Preferences</button>
+    `;
+    openModal();
+}
+
+/** Save client schedule preferences from the modal form */
+async function saveClientSchedulePrefsForm() {
+    const clientId = document.getElementById('prefs-client-id')?.value;
+    if (!clientId) return;
+
+    const preferred_days = [...document.querySelectorAll('input[name="pref-day"]:checked')].map(cb => cb.value);
+    const prefs = {
+        preferred_days,
+        preferred_start:    document.getElementById('prefs-start')?.value     || null,
+        preferred_end:      document.getElementById('prefs-end')?.value       || null,
+        visit_length_hours: parseFloat(document.getElementById('prefs-length')?.value)  || null,
+        frequency:          document.getElementById('prefs-frequency')?.value  || null,
+        service_type:       document.getElementById('prefs-service')?.value    || null,
+        start_date:         document.getElementById('prefs-startdate')?.value  || null,
+        is_recurring:       document.getElementById('prefs-recurring')?.checked,
+        notes:              document.getElementById('prefs-notes')?.value      || null
+    };
+
+    const result = await saveClientSchedulePreferences(clientId, prefs);
+    if (result) {
+        CareHubToast.success('Schedule preferences saved.');
+        closeModal();
+        await loadClientPrefs(clientId);
+    } else {
+        CareHubToast.error('Failed to save preferences. Check console for details.');
+    }
+}
+
 // ==================== SCHEDULE MODAL FUNCTIONS ====================
 
 async function openCreateScheduleModal() {
@@ -4405,6 +5109,28 @@ async function saveSchedule(id = null) {
         return;
     }
 
+    // Conflict check (non-blocking warning)
+    const conflicts = await checkScheduleConflicts({
+        date:         scheduleData.date,
+        start_time:   scheduleData.start_time,
+        end_time:     scheduleData.end_time,
+        caregiver_id: scheduleData.caregiver_id,
+        client_id:    scheduleData.client_id,
+        exclude_id:   id || undefined
+    });
+    if (conflicts.length > 0) {
+        const messages = conflicts.map(c => '• ' + c.message).join('\n');
+        const proceed = await CareHubConfirm.confirm({
+            title:       'Scheduling Conflicts Detected',
+            message:     `${messages}\n\nDo you want to proceed anyway?`,
+            confirmText: 'Create Anyway',
+            cancelText:  'Go Back',
+            icon:        'ph-warning',
+            iconColor:   '#F59E0B'
+        });
+        if (!proceed) return;
+    }
+
     let success;
     if (id) {
         // Update existing
@@ -4412,6 +5138,11 @@ async function saveSchedule(id = null) {
         if (success) {
             CareHubToast.success('Visit updated successfully.');
             await viewSchedule(id);
+            await createNotification({
+                type: 'schedule_updated', title: 'Visit Updated',
+                message: `Visit on ${scheduleData.date} at ${scheduleData.start_time} was updated.`,
+                related_id: id, related_type: 'schedule'
+            });
         }
     } else {
         // Create new
@@ -4420,6 +5151,11 @@ async function saveSchedule(id = null) {
         if (success) {
             CareHubToast.success('Visit scheduled successfully.');
             closeModal();
+            await createNotification({
+                type: 'schedule_created', title: 'Visit Scheduled',
+                message: `New visit scheduled for ${scheduleData.date} at ${scheduleData.start_time}.`,
+                related_id: newSchedule.id, related_type: 'schedule'
+            });
         }
     }
 
@@ -4458,6 +5194,12 @@ async function cancelScheduleUI(id) {
         if (document.getElementById('schedulesContent')) {
             await loadSchedules('upcoming');
         }
+        await createNotification({
+            type: 'visit_cancelled', title: 'Visit Cancelled',
+            message: `Visit has been cancelled${reason ? ': ' + reason : ''}.`,
+            related_table: 'schedules', related_record_id: id,
+            recipient_role: 'caregiver', priority: 'high'
+        });
     } else {
         CareHubToast.error('Failed to cancel visit. Check console for errors.');
     }
@@ -4805,6 +5547,12 @@ async function approveTimesheetUI(id) {
         if (document.getElementById('timesheetsContent')) {
             await loadTimesheets(currentTimesheetFilter);
         }
+        await createNotification({
+            type: 'timesheet_approved', title: 'Timesheet Approved',
+            message: 'Your timesheet has been approved and is ready for payroll.',
+            related_table: 'timesheets', related_record_id: id,
+            recipient_role: 'caregiver', priority: 'normal'
+        });
     } else {
         CareHubToast.error('Failed to approve timesheet.');
     }
@@ -4828,6 +5576,12 @@ async function rejectTimesheetUI(id) {
         if (document.getElementById('timesheetsContent')) {
             await loadTimesheets(currentTimesheetFilter);
         }
+        await createNotification({
+            type: 'timesheet_rejected', title: 'Timesheet Rejected',
+            message: `Your timesheet was rejected${reason ? ': ' + reason : ''}.`,
+            related_table: 'timesheets', related_record_id: id,
+            recipient_role: 'caregiver', priority: 'high'
+        });
     } else {
         CareHubToast.error('Failed to reject timesheet.');
     }
@@ -5490,6 +6244,12 @@ async function approveVisitUpdateUI(id) {
         if (document.getElementById('visitUpdatesContent')) {
             await loadVisitUpdates(currentVisitUpdateFilter);
         }
+        await createNotification({
+            type: 'visit_update_approved', title: 'Visit Update Approved',
+            message: 'A visit update has been approved and is visible to the family.',
+            related_table: 'visit_updates', related_record_id: id,
+            recipient_role: 'client_family', priority: 'normal'
+        });
     } else {
         CareHubToast.error('Failed to approve visit update.');
     }
@@ -5513,6 +6273,12 @@ async function rejectVisitUpdateUI(id) {
         if (document.getElementById('visitUpdatesContent')) {
             await loadVisitUpdates(currentVisitUpdateFilter);
         }
+        await createNotification({
+            type: 'visit_update_rejected', title: 'Visit Update Rejected',
+            message: `Visit update was rejected${reason ? ': ' + reason : ''}.`,
+            related_table: 'visit_updates', related_record_id: id,
+            recipient_role: 'caregiver', priority: 'normal'
+        });
     } else {
         CareHubToast.error('Failed to reject visit update.');
     }
@@ -5540,6 +6306,416 @@ async function markVisitUpdateInternalUI(id) {
     }
 }
 
+// ==================== NOTIFICATIONS UI MODULE ====================
+
+/**
+ * CareHubNotifications — bell badge, portal dropdown, and page rendering.
+ *
+ * The dropdown is rendered as a PORTAL appended to document.body so it is
+ * never clipped by the sidebar's overflow:hidden or any ancestor CSS.
+ * Position is calculated from the bell button's getBoundingClientRect() at
+ * open time and kept in sync on scroll/resize.
+ */
+window.CareHubNotifications = (function () {
+    'use strict';
+
+    const PORTAL_ID  = 'notif-portal';
+    let _unreadCount = 0;
+    let _isOpen      = false;
+    let _scrollHandler = null;
+    let _resizeHandler = null;
+
+    const TYPE_ICON = {
+        new_visit_assigned:     'ph-calendar-plus',
+        visit_changed:          'ph-calendar-dots',
+        visit_cancelled:        'ph-calendar-x',
+        caregiver_reassigned:   'ph-arrows-left-right',
+        timesheet_submitted:    'ph-clock',
+        timesheet_approved:     'ph-check-circle',
+        timesheet_rejected:     'ph-x-circle',
+        visit_update_submitted: 'ph-note-pencil',
+        visit_update_approved:  'ph-seal-check',
+        visit_update_rejected:  'ph-seal-warning',
+        training_assigned:      'ph-graduation-cap',
+        invite_queued:          'ph-envelope',
+        invite_sent:            'ph-paper-plane-tilt',
+        emergency_alert:        'ph-warning-octagon',
+        schedule_created:       'ph-calendar-check',
+        schedule_updated:       'ph-calendar-blank'
+    };
+
+    const PRIORITY_COLOR = {
+        emergency: '#dc2626',
+        high:      '#d97706',
+        normal:    '#b45309',
+        low:       '#9ca3af'
+    };
+
+    // ── Portal: get or create the body-level dropdown container ─────────────
+
+    function _getPortal() {
+        let el = document.getElementById(PORTAL_ID);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = PORTAL_ID;
+            el.className = 'notif-dropdown';
+            document.body.appendChild(el);
+            if (window.DEBUG) console.log('[CareHubNotifications] Portal created and appended to body');
+        }
+        return el;
+    }
+
+    // ── Position portal above the bell button ────────────────────────────────
+
+    function _positionPortal() {
+        const bell   = document.getElementById('notif-bell-btn');
+        const portal = _getPortal();
+        if (!bell) return;
+
+        const rect    = bell.getBoundingClientRect();
+        const pw      = 360; // dropdown width
+        const margin  = 8;
+
+        // Prefer left-aligned with bell; clamp so it doesn't go off right edge
+        let left = rect.left;
+        if (left + pw > window.innerWidth - margin) {
+            left = window.innerWidth - pw - margin;
+        }
+        if (left < margin) left = margin;
+
+        // Place above the bell (bottom of portal = top of bell - margin)
+        // If there's not enough space above, place below instead
+        const spaceAbove = rect.top;
+        const maxH       = 420;
+        let top;
+        if (spaceAbove >= maxH + margin) {
+            top = rect.top - maxH - margin;
+        } else {
+            top = rect.bottom + margin;
+        }
+
+        portal.style.left     = `${left}px`;
+        portal.style.top      = `${top}px`;
+        portal.style.width    = `${pw}px`;
+        portal.style.maxHeight = `${maxH}px`;
+
+        if (window.DEBUG) console.log(`[CareHubNotifications] Portal positioned — left:${left} top:${top} width:${pw}`);
+    }
+
+    // ── Bell badge ───────────────────────────────────────────────────────────
+
+    function _getBadge() { return document.getElementById('notif-badge'); }
+
+    function _setBadge(count) {
+        _unreadCount = Math.max(0, count);
+        const badge = _getBadge();
+        if (!badge) return;
+        if (_unreadCount === 0) {
+            badge.style.display = 'none';
+            badge.textContent   = '';
+        } else {
+            badge.style.display = 'flex';
+            badge.textContent   = _unreadCount > 99 ? '99+' : String(_unreadCount);
+        }
+        if (window.DEBUG) console.log(`[CareHubNotifications] Badge set to ${_unreadCount}`);
+    }
+
+    function incrementBadge() { _setBadge(_unreadCount + 1); }
+
+    // ── Refresh badge (and re-render if open) ────────────────────────────────
+
+    async function refresh() {
+        if (typeof getNotificationCount !== 'function') return;
+        const count = await getNotificationCount();
+        _setBadge(count);
+        if (_isOpen) await _renderDropdown();
+    }
+
+    // ── Toggle open/close ────────────────────────────────────────────────────
+
+    async function toggleDropdown() {
+        const bell = document.getElementById('notif-bell-btn');
+        if (window.DEBUG) console.log(`[CareHubNotifications] toggleDropdown — currently open: ${_isOpen}`);
+
+        if (_isOpen) {
+            _closeDropdown();
+        } else {
+            _openDropdown();
+        }
+    }
+
+    function _openDropdown() {
+        const portal = _getPortal();
+        _isOpen = true;
+        portal.classList.add('notif-dropdown--open');
+        _positionPortal();
+        _renderDropdown();
+
+        // Keep position synced while open
+        _scrollHandler = () => _positionPortal();
+        _resizeHandler = () => _positionPortal();
+        window.addEventListener('scroll', _scrollHandler, { passive: true });
+        window.addEventListener('resize', _resizeHandler, { passive: true });
+
+        if (window.DEBUG) console.log('[CareHubNotifications] Dropdown opened');
+    }
+
+    function _closeDropdown() {
+        const portal = document.getElementById(PORTAL_ID);
+        if (portal) portal.classList.remove('notif-dropdown--open');
+        _isOpen = false;
+
+        if (_scrollHandler) { window.removeEventListener('scroll', _scrollHandler); _scrollHandler = null; }
+        if (_resizeHandler) { window.removeEventListener('resize', _resizeHandler); _resizeHandler = null; }
+
+        if (window.DEBUG) console.log('[CareHubNotifications] Dropdown closed');
+    }
+
+    // ── Render dropdown content ──────────────────────────────────────────────
+
+    async function _renderDropdown() {
+        const portal = _getPortal();
+
+        portal.innerHTML = `<div style="padding:14px;text-align:center;color:#9ca3af;font-size:13px;">
+            <div class="spinner" style="width:20px;height:20px;margin:0 auto 8px;"></div>Loading…
+        </div>`;
+
+        const items = await getUnreadNotifications();
+
+        if (window.DEBUG) console.log(`[CareHubNotifications] Rendering dropdown — ${items.length} unread item(s)`);
+
+        const headerHtml = `
+            <div class="notif-dropdown-header">
+                <span>Notifications${items.length ? ` <span style="font-weight:400;color:#9ca3af;">(${items.length} unread)</span>` : ''}</span>
+                <div style="display:flex;gap:6px;">
+                    ${items.length ? `<button class="notif-action-btn" onclick="CareHubNotifications.markAllRead()">Mark all read</button>` : ''}
+                    <button class="notif-action-btn" onclick="CareHubNotifications.closeAndNavigate()">View all</button>
+                </div>
+            </div>`;
+
+        if (items.length === 0) {
+            portal.innerHTML = headerHtml + `
+                <div style="padding:28px 16px;text-align:center;">
+                    <i class="ph ph-bell-slash" style="font-size:32px;color:#d1d5db;display:block;margin-bottom:8px;"></i>
+                    <div style="font-size:13px;color:#9ca3af;">No notifications yet.</div>
+                </div>`;
+            return;
+        }
+
+        const rows = items.slice(0, 8).map(n => `
+            <div class="notif-item" onclick="CareHubNotifications.markRead('${n.id}')">
+                <div class="notif-item-icon" style="color:${PRIORITY_COLOR[n.priority] || PRIORITY_COLOR.normal};">
+                    <i class="ph ${TYPE_ICON[n.type] || 'ph-bell'}"></i>
+                </div>
+                <div class="notif-item-body">
+                    <div class="notif-item-title">${escapeHtml(n.title)}</div>
+                    <div class="notif-item-msg">${escapeHtml(n.message)}</div>
+                    <div class="notif-item-time">${_relativeTime(n.created_at)}</div>
+                </div>
+                <button class="notif-dismiss" title="Dismiss" onclick="event.stopPropagation();CareHubNotifications.deleteOne('${n.id}')">✕</button>
+            </div>`).join('');
+
+        portal.innerHTML = headerHtml + `<div class="notif-list">${rows}</div>`;
+        // Re-position after content renders (height may have changed)
+        _positionPortal();
+    }
+
+    // ── Actions ──────────────────────────────────────────────────────────────
+
+    async function markRead(id) {
+        await markNotificationRead(id);
+        await refresh();
+    }
+
+    async function markAllRead() {
+        await markAllNotificationsRead();
+        _setBadge(0);
+        _closeDropdown();
+        if (document.getElementById('notificationsContent')) {
+            await renderNotifications();
+        }
+    }
+
+    async function deleteOne(id) {
+        await deleteNotification(id);
+        await refresh();
+        if (document.getElementById('notificationsContent')) {
+            await renderNotifications();
+        }
+    }
+
+    function closeAndNavigate() {
+        _closeDropdown();
+        loadPage('notifications');
+    }
+
+    // ── Relative time helper ─────────────────────────────────────────────────
+
+    function _relativeTime(iso) {
+        const diff = Date.now() - new Date(iso).getTime();
+        if (diff < 60000)    return 'just now';
+        if (diff < 3600000)  return `${Math.floor(diff / 60000)}m ago`;
+        if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+        return `${Math.floor(diff / 86400000)}d ago`;
+    }
+
+    return { refresh, incrementBadge, toggleDropdown, markRead, markAllRead, deleteOne, closeAndNavigate, _closeDropdown };
+})();
+
+// ── Close portal dropdown on outside click ───────────────────────────────────
+document.addEventListener('click', function (e) {
+    const bell   = document.getElementById('notif-bell-btn');
+    const portal = document.getElementById('notif-portal');
+    if (!portal || !bell) return;
+    if (!portal.classList.contains('notif-dropdown--open')) return;
+    if (!bell.contains(e.target) && !portal.contains(e.target)) {
+        portal.classList.remove('notif-dropdown--open');
+        // Sync internal state
+        if (window.CareHubNotifications && typeof window.CareHubNotifications._closeDropdown === 'function') {
+            window.CareHubNotifications._closeDropdown();
+        }
+    }
+}, true); // capture phase to beat other listeners
+
+// ==================== NOTIFICATIONS PAGE ====================
+
+let _notifFilter = { unreadOnly: false, type: '', priority: '' };
+
+async function renderNotifications() {
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
+
+    const TYPE_OPTS = [
+        'new_visit_assigned','visit_changed','visit_cancelled','caregiver_reassigned',
+        'timesheet_submitted','timesheet_approved','timesheet_rejected',
+        'visit_update_submitted','visit_update_approved','visit_update_rejected',
+        'training_assigned','invite_queued','invite_sent','emergency_alert',
+        'schedule_created','schedule_updated'
+    ];
+
+    mainContent.innerHTML = `
+        <div class="page-header animate-fade-in">
+            <h1>Notifications</h1>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <button class="btn btn-secondary btn-sm" onclick="CareHubNotifications.markAllRead()">
+                    <i class="ph ph-checks"></i> Mark All Read
+                </button>
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:var(--spacing-md);">
+            <div class="card-body" style="display:flex;flex-wrap:wrap;gap:var(--spacing-sm);align-items:center;">
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+                    <input type="checkbox" id="notif-unread-only" style="width:auto;" onchange="_applyNotifFilter()" ${_notifFilter.unreadOnly ? 'checked' : ''}>
+                    Unread only
+                </label>
+                <select id="notif-type-filter" class="form-select" style="max-width:220px;font-size:13px;" onchange="_applyNotifFilter()">
+                    <option value="">All types</option>
+                    ${TYPE_OPTS.map(t => `<option value="${t}" ${_notifFilter.type === t ? 'selected' : ''}>${t.replace(/_/g,' ')}</option>`).join('')}
+                </select>
+                <select id="notif-priority-filter" class="form-select" style="max-width:150px;font-size:13px;" onchange="_applyNotifFilter()">
+                    <option value="">All priorities</option>
+                    ${['low','normal','high','emergency'].map(p => `<option value="${p}" ${_notifFilter.priority === p ? 'selected' : ''}>${p.charAt(0).toUpperCase()+p.slice(1)}</option>`).join('')}
+                </select>
+            </div>
+        </div>
+
+        <div id="notificationsContent">
+            <div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>
+        </div>
+    `;
+
+    await _loadNotificationsContent();
+}
+
+async function _applyNotifFilter() {
+    _notifFilter.unreadOnly = document.getElementById('notif-unread-only')?.checked || false;
+    _notifFilter.type       = document.getElementById('notif-type-filter')?.value    || '';
+    _notifFilter.priority   = document.getElementById('notif-priority-filter')?.value || '';
+    await _loadNotificationsContent();
+}
+
+async function _loadNotificationsContent() {
+    const container = document.getElementById('notificationsContent');
+    if (!container) return;
+
+    const items = await getNotifications({
+        unreadOnly: _notifFilter.unreadOnly,
+        type:       _notifFilter.type       || null,
+        priority:   _notifFilter.priority   || null,
+        limit: 100
+    });
+
+    if (items.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon"><i class="ph ph-bell-slash"></i></div>
+                <h3>No notifications</h3>
+                <p>Nothing to show with the current filters.</p>
+            </div>`;
+        return;
+    }
+
+    const TYPE_ICON = {
+        new_visit_assigned: 'ph-calendar-plus', visit_changed: 'ph-calendar-dots',
+        visit_cancelled: 'ph-calendar-x', caregiver_reassigned: 'ph-arrows-left-right',
+        timesheet_submitted: 'ph-clock', timesheet_approved: 'ph-check-circle',
+        timesheet_rejected: 'ph-x-circle', visit_update_submitted: 'ph-note-pencil',
+        visit_update_approved: 'ph-seal-check', visit_update_rejected: 'ph-seal-warning',
+        training_assigned: 'ph-graduation-cap', invite_queued: 'ph-envelope',
+        invite_sent: 'ph-paper-plane-tilt', emergency_alert: 'ph-warning-octagon',
+        schedule_created: 'ph-calendar-check', schedule_updated: 'ph-calendar-blank'
+    };
+
+    const PRIORITY_BADGE = {
+        emergency: 'status-denied',
+        high:      'status-warning',
+        normal:    '',
+        low:       'status-info'
+    };
+
+    container.innerHTML = `
+        <div class="card">
+            <div class="card-body" style="padding:0;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th style="width:36px;"></th>
+                            <th>Title</th>
+                            <th>Message</th>
+                            <th>Type</th>
+                            <th>Priority</th>
+                            <th>Time</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${items.map(n => `
+                        <tr class="${n.read_at ? '' : 'notif-row--unread'}">
+                            <td style="text-align:center;"><i class="ph ${TYPE_ICON[n.type] || 'ph-bell'}" style="font-size:16px;opacity:0.7;"></i></td>
+                            <td><strong>${escapeHtml(n.title)}</strong></td>
+                            <td style="max-width:300px;font-size:13px;">${escapeHtml(n.message)}</td>
+                            <td><span style="font-size:12px;color:var(--warm-muted);">${n.type.replace(/_/g,' ')}</span></td>
+                            <td>${n.priority !== 'normal' ? `<span class="status-badge ${PRIORITY_BADGE[n.priority] || ''}" style="font-size:11px;">${n.priority}</span>` : '<span style="font-size:12px;color:var(--warm-muted);">normal</span>'}</td>
+                            <td style="font-size:12px;white-space:nowrap;">${_notifRelTime(n.created_at)}</td>
+                            <td class="actions">
+                                ${!n.read_at ? `<button class="btn btn-sm btn-secondary" onclick="CareHubNotifications.markRead('${n.id}');_loadNotificationsContent()">Mark read</button>` : ''}
+                                <button class="btn btn-sm btn-danger" onclick="CareHubNotifications.deleteOne('${n.id}')">Delete</button>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>`;
+}
+
+function _notifRelTime(iso) {
+    const diff = Date.now() - new Date(iso).getTime();
+    if (diff < 60000)    return 'just now';
+    if (diff < 3600000)  return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return new Date(iso).toLocaleDateString();
+}
+
 // ==================== UTILITY FUNCTIONS ====================
 
 function formatTime(timeString) {
@@ -5560,6 +6736,598 @@ window.viewCaregiver = viewCaregiver;
 window.viewClient = viewClient;
 window.approveApplication = approveApplication;
 window.sendCaregiverInvite = sendCaregiverInvite;
+window.renderScheduleBuilder = renderScheduleBuilder;
+window.loadClientPrefs = loadClientPrefs;
+window.loadCaregiverAvailabilityPanel = loadCaregiverAvailabilityPanel;
+window.addCaregiverUnavailableDateUI = addCaregiverUnavailableDateUI;
+window.removeCaregiverUnavailableDateUI = removeCaregiverUnavailableDateUI;
+window.refreshSuggestedCaregivers = refreshSuggestedCaregivers;
+window.selectSuggestedCaregiver = selectSuggestedCaregiver;
+window.checkBuilderConflicts = checkBuilderConflicts;
+window.scheduleBuilderCreateVisit = scheduleBuilderCreateVisit;
+window.openCaregiverAvailabilityModal = openCaregiverAvailabilityModal;
+window.saveCaregiverAvailabilityForm = saveCaregiverAvailabilityForm;
+window.openClientSchedulePrefsModal = openClientSchedulePrefsModal;
+window.saveClientSchedulePrefsForm = saveClientSchedulePrefsForm;
+window.toggleRecurringFields = toggleRecurringFields;
+// ==================== TRAINING HUB ====================
+
+let _trainingTab = 'training'; // 'training' | 'onboarding' | 'resources' | 'emergency'
+
+async function renderTrainingHub() {
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : 'admin_owner';
+    const isAdmin = role === 'admin_owner' || role === 'co_owner';
+
+    mainContent.innerHTML = `
+        <div class="page-header animate-fade-in">
+            <h1><i class="ph ph-graduation-cap" style="margin-right:8px;"></i>Training Hub</h1>
+            ${isAdmin ? `<button class="btn btn-primary btn-sm" onclick="openAddTrainingModuleModal()"><i class="ph ph-plus"></i> Add Training</button>` : ''}
+        </div>
+
+        <div class="tab-nav" style="margin-bottom:var(--spacing-md);">
+            <button class="tab-btn ${_trainingTab==='training'?'active':''}" onclick="switchTrainingTab('training')"><i class="ph ph-books"></i> Training</button>
+            <button class="tab-btn ${_trainingTab==='onboarding'?'active':''}" onclick="switchTrainingTab('onboarding')"><i class="ph ph-clipboard-text"></i> Onboarding</button>
+            <button class="tab-btn ${_trainingTab==='resources'?'active':''}" onclick="switchTrainingTab('resources')"><i class="ph ph-folder-open"></i> Resources</button>
+            <button class="tab-btn ${_trainingTab==='emergency'?'active':''}" onclick="switchTrainingTab('emergency')"><i class="ph ph-warning-octagon"></i> Emergency</button>
+        </div>
+
+        <div id="training-hub-content">
+            <div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>
+        </div>`;
+
+    await _loadTrainingTabContent(role, isAdmin);
+}
+
+async function switchTrainingTab(tab) {
+    _trainingTab = tab;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => { if (b.textContent.toLowerCase().includes(tab === 'training' ? 'training' : tab === 'onboarding' ? 'onboard' : tab === 'resources' ? 'resource' : 'emergency')) b.classList.add('active'); });
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : 'admin_owner';
+    const isAdmin = role === 'admin_owner' || role === 'co_owner';
+    await _loadTrainingTabContent(role, isAdmin);
+}
+
+async function _loadTrainingTabContent(role, isAdmin) {
+    const c = document.getElementById('training-hub-content');
+    if (!c) return;
+    c.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>';
+
+    if (_trainingTab === 'training')   await _renderTrainingTab(c, role, isAdmin);
+    if (_trainingTab === 'onboarding') await _renderOnboardingTab(c, role, isAdmin);
+    if (_trainingTab === 'resources')  await _renderResourcesTab(c, isAdmin);
+    if (_trainingTab === 'emergency')  await _renderEmergencyTab(c, isAdmin);
+}
+
+// ── Training Tab ─────────────────────────────────────────────────────────────
+
+async function _renderTrainingTab(c, role, isAdmin) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+
+    const [modules, assignments] = await Promise.all([
+        getTrainingModules({ activeOnly: !isAdmin }),
+        getTrainingAssignments(isAdmin ? {} : { caregiverId })
+    ]);
+
+    const assignMap = {};
+    assignments.forEach(a => {
+        const key = `${a.module_id}__${a.caregiver_id}`;
+        assignMap[key] = a;
+    });
+
+    const STATUS_COLOR = { assigned:'#d97706', in_progress:'#3b82f6', completed:'#16a34a', overdue:'#dc2626', waived:'#9ca3af' };
+
+    if (modules.length === 0) {
+        c.innerHTML = `<div class="empty-state"><div class="empty-state-icon"><i class="ph ph-books"></i></div><h3>No training modules yet</h3>${isAdmin ? '<p><button class="btn btn-primary" onclick="openAddTrainingModuleModal()"><i class="ph ph-plus"></i> Add Module</button></p>' : '<p>No training has been assigned yet.</p>'}</div>`;
+        return;
+    }
+
+    const CATEGORY_ICON = { onboarding:'ph-clipboard', safety:'ph-shield-check', clinical:'ph-stethoscope', compliance:'ph-scales', soft_skills:'ph-chat-circle', policy:'ph-file-text', general:'ph-books' };
+    const TYPE_ICON = { document:'ph-file-text', video:'ph-video', link:'ph-link', quiz:'ph-question', photo_guide:'ph-images' };
+
+    const cards = modules.map(m => {
+        const aKey = caregiverId ? `${m.id}__${caregiverId}` : null;
+        const a    = aKey ? assignMap[aKey] : null;
+        const statusHtml = a
+            ? `<span class="th-status-dot" style="background:${STATUS_COLOR[a.status]||'#9ca3af'};"></span><span style="font-size:12px;color:${STATUS_COLOR[a.status]||'#9ca3af'};">${a.status.replace('_',' ')}</span>`
+            : isAdmin ? '' : `<span style="font-size:12px;color:#9ca3af;">not assigned</span>`;
+
+        const dueHtml = a?.due_date ? `<span style="font-size:11px;color:#9ca3af;margin-left:8px;">Due ${a.due_date}</span>` : '';
+
+        const actionBtns = isAdmin
+            ? `<div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;">
+                <button class="btn btn-sm btn-secondary" onclick="openAssignModuleModal('${m.id}','${escapeHtml(m.title)}')"><i class="ph ph-user-plus"></i> Assign</button>
+                <button class="btn btn-sm btn-secondary" onclick="openEditTrainingModuleModal('${m.id}')"><i class="ph ph-pencil"></i> Edit</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteTrainingModuleUI('${m.id}')"><i class="ph ph-trash"></i></button>
+               </div>`
+            : a && a.status !== 'completed'
+                ? `<div style="margin-top:10px;display:flex;gap:6px;">
+                    ${m.requires_acknowledgement
+                        ? `<button class="btn btn-sm btn-primary" onclick="acknowledgeTrainingUI('${a.id}')"><i class="ph ph-check"></i> Acknowledge & Complete</button>`
+                        : `<button class="btn btn-sm btn-success" onclick="markTrainingCompleteUI('${a.id}')"><i class="ph ph-check-circle"></i> Mark Complete</button>`}
+                   </div>`
+                : a?.status === 'completed' ? `<div style="margin-top:10px;"><span style="color:#16a34a;font-size:13px;"><i class="ph ph-seal-check"></i> Completed ${a.completed_at ? new Date(a.completed_at).toLocaleDateString() : ''}</span></div>` : '';
+
+        return `
+        <div class="th-module-card ${m.is_required ? 'th-required' : ''}">
+            <div style="display:flex;gap:12px;align-items:flex-start;">
+                <div class="th-module-icon"><i class="ph ${CATEGORY_ICON[m.category]||'ph-books'}"></i></div>
+                <div style="flex:1;min-width:0;">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        <strong style="font-size:14px;">${escapeHtml(m.title)}</strong>
+                        ${m.is_required ? '<span class="th-badge th-badge-required">Required</span>' : ''}
+                        <span class="th-badge" style="background:#f3f4f6;color:#374151;">${m.category}</span>
+                        <i class="ph ${TYPE_ICON[m.content_type]||'ph-file'}" title="${m.content_type}" style="color:#9ca3af;font-size:14px;"></i>
+                    </div>
+                    ${m.description ? `<div style="font-size:13px;color:#6b7280;margin-top:4px;">${escapeHtml(m.description)}</div>` : ''}
+                    ${m.duration_minutes ? `<div style="font-size:12px;color:#9ca3af;margin-top:2px;"><i class="ph ph-clock"></i> ${m.duration_minutes} min</div>` : ''}
+                    <div style="display:flex;align-items:center;margin-top:6px;">${statusHtml}${dueHtml}</div>
+                    ${m.content_url ? `<a href="${escapeHtml(m.content_url)}" target="_blank" rel="noopener" class="btn btn-sm btn-secondary" style="margin-top:8px;display:inline-flex;gap:4px;"><i class="ph ph-arrow-square-out"></i> Open</a>` : ''}
+                    ${m.content_body ? `<div class="th-content-body">${escapeHtml(m.content_body)}</div>` : ''}
+                    ${actionBtns}
+                </div>
+            </div>
+        </div>`;
+    });
+
+    c.innerHTML = `<div class="th-module-grid">${cards.join('')}</div>`;
+}
+
+// ── Onboarding Tab ───────────────────────────────────────────────────────────
+
+async function _renderOnboardingTab(c, role, isAdmin) {
+    if (isAdmin) {
+        const rows = await getAllOnboardingChecklists();
+        if (rows.length === 0) {
+            c.innerHTML = `<div class="empty-state"><div class="empty-state-icon"><i class="ph ph-clipboard-text"></i></div><h3>No onboarding records</h3><p>Run the migration to seed onboarding rows for existing caregivers.</p></div>`;
+            return;
+        }
+
+        const pct = r => {
+            const fields = ['profile_completed','handbook_reviewed','emergency_policy_reviewed','timesheet_training_done','visit_update_training_done','document_upload_done','orientation_completed'];
+            const done = fields.filter(f => r[f]).length;
+            return Math.round((done / fields.length) * 100);
+        };
+
+        c.innerHTML = `
+            <div class="card">
+              <div class="card-body" style="padding:0;">
+                <table class="data-table">
+                    <thead><tr>
+                        <th>Caregiver</th><th>Progress</th>
+                        <th>Profile</th><th>Handbook</th><th>Emergency Policy</th>
+                        <th>Timesheet Trng</th><th>Visit Upd Trng</th><th>Docs Uploaded</th>
+                        <th>Background</th><th>Orientation</th><th>Actions</th>
+                    </tr></thead>
+                    <tbody>
+                        ${rows.map(r => {
+                            const p = pct(r);
+                            const check = v => v ? '<i class="ph ph-check-circle" style="color:#16a34a;font-size:16px;"></i>' : '<i class="ph ph-circle" style="color:#d1d5db;font-size:16px;"></i>';
+                            const bgColor = { pending:'#d97706', submitted:'#3b82f6', cleared:'#16a34a', failed:'#dc2626', waived:'#9ca3af' };
+                            return `<tr>
+                                <td><strong>${escapeHtml(r.caregivers?.name || 'Unknown')}</strong></td>
+                                <td><div style="display:flex;align-items:center;gap:6px;"><div style="flex:1;height:6px;background:#f3f4f6;border-radius:3px;overflow:hidden;"><div style="width:${p}%;height:100%;background:${p===100?'#16a34a':'#3b82f6'};border-radius:3px;"></div></div><span style="font-size:12px;white-space:nowrap;">${p}%</span></div></td>
+                                <td style="text-align:center;">${check(r.profile_completed)}</td>
+                                <td style="text-align:center;">${check(r.handbook_reviewed)}</td>
+                                <td style="text-align:center;">${check(r.emergency_policy_reviewed)}</td>
+                                <td style="text-align:center;">${check(r.timesheet_training_done)}</td>
+                                <td style="text-align:center;">${check(r.visit_update_training_done)}</td>
+                                <td style="text-align:center;">${check(r.document_upload_done)}</td>
+                                <td><span style="font-size:12px;color:${bgColor[r.background_check_status]||'#9ca3af'};">${r.background_check_status}</span></td>
+                                <td style="text-align:center;">${check(r.orientation_completed)}</td>
+                                <td><button class="btn btn-sm btn-secondary" onclick="openOnboardingEditModal('${r.caregiver_id}')"><i class="ph ph-pencil"></i> Edit</button></td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
+              </div>
+            </div>`;
+    } else {
+        const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+        if (!caregiverId) { c.innerHTML = '<div class="empty-state"><h3>No caregiver profile linked.</h3></div>'; return; }
+
+        const r = await getOnboardingChecklist(caregiverId);
+        if (!r) { c.innerHTML = '<div class="empty-state"><h3>Onboarding checklist not set up yet.</h3><p>Contact your supervisor.</p></div>'; return; }
+
+        const steps = [
+            { key: 'profile_completed',          label: 'Profile Completed',              icon: 'ph-user-circle' },
+            { key: 'handbook_reviewed',           label: 'Caregiver Handbook Reviewed',    icon: 'ph-book-open' },
+            { key: 'emergency_policy_reviewed',   label: 'Emergency Policy Reviewed',      icon: 'ph-warning-octagon' },
+            { key: 'timesheet_training_done',     label: 'Timesheet Training Completed',   icon: 'ph-clock' },
+            { key: 'visit_update_training_done',  label: 'Visit Update Training Completed',icon: 'ph-clipboard-text' },
+            { key: 'document_upload_done',        label: 'Required Documents Uploaded',    icon: 'ph-upload-simple' },
+            { key: 'orientation_completed',       label: 'Orientation Completed',          icon: 'ph-presentation-chart' },
+        ];
+        const done  = steps.filter(s => r[s.key]).length;
+        const total = steps.length;
+        const pct   = Math.round((done / total) * 100);
+
+        const BGC_LABEL = { pending:'Pending', submitted:'Submitted', cleared:'Cleared ✓', failed:'Failed', waived:'Waived' };
+        const BGC_COLOR = { pending:'#d97706', submitted:'#3b82f6', cleared:'#16a34a', failed:'#dc2626', waived:'#9ca3af' };
+
+        c.innerHTML = `
+            <div class="card" style="max-width:600px;">
+              <div class="card-body">
+                <h3 style="margin-bottom:4px;">Your Onboarding Progress</h3>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+                    <div style="flex:1;height:10px;background:#f3f4f6;border-radius:5px;overflow:hidden;">
+                        <div style="width:${pct}%;height:100%;background:${pct===100?'#16a34a':'#3b82f6'};border-radius:5px;transition:width 0.4s;"></div>
+                    </div>
+                    <strong style="font-size:15px;">${pct}%</strong>
+                </div>
+                ${steps.map(s => `
+                <div class="th-checklist-row ${r[s.key] ? 'th-checklist-done' : ''}">
+                    <i class="ph ${r[s.key] ? 'ph-check-circle' : 'ph-circle'}" style="font-size:20px;color:${r[s.key]?'#16a34a':'#d1d5db'};flex-shrink:0;"></i>
+                    <i class="ph ${s.icon}" style="font-size:16px;color:#6b7280;flex-shrink:0;"></i>
+                    <span style="font-size:14px;">${s.label}</span>
+                </div>`).join('')}
+                <div class="th-checklist-row" style="margin-top:8px;">
+                    <i class="ph ph-shield-check" style="font-size:20px;color:${r.background_check_status==='cleared'?'#16a34a':'#d97706'};flex-shrink:0;"></i>
+                    <i class="ph ph-fingerprint" style="font-size:16px;color:#6b7280;flex-shrink:0;"></i>
+                    <span style="font-size:14px;">Background Check — <strong style="color:${BGC_COLOR[r.background_check_status]};">${BGC_LABEL[r.background_check_status]||r.background_check_status}</strong></span>
+                </div>
+                ${r.notes ? `<div style="margin-top:16px;padding:10px;background:#fef9c3;border-radius:8px;font-size:13px;"><strong>Admin note:</strong> ${escapeHtml(r.notes)}</div>` : ''}
+              </div>
+            </div>`;
+    }
+}
+
+// ── Resources Tab ────────────────────────────────────────────────────────────
+
+async function _renderResourcesTab(c, isAdmin) {
+    const resources = await getCaregiverResources({ activeOnly: !isAdmin });
+
+    const CATEGORY_COLOR = { handbook:'#3b82f6', emergency:'#dc2626', policy:'#7c3aed', contact:'#059669', mileage:'#d97706', dress_code:'#ec4899', communication:'#0891b2', incident:'#ea580c', general:'#6b7280' };
+    const CATEGORY_ICON  = { handbook:'ph-book-open', emergency:'ph-warning-octagon', policy:'ph-file-text', contact:'ph-phone', mileage:'ph-car', dress_code:'ph-t-shirt', communication:'ph-chat-circle', incident:'ph-clipboard-text', general:'ph-folder' };
+    const TYPE_ICON = { document:'ph-file-text', video:'ph-video', link:'ph-link', phone:'ph-phone', text_block:'ph-article' };
+
+    const adminBar = isAdmin ? `<div style="margin-bottom:var(--spacing-md);display:flex;gap:8px;">
+        <button class="btn btn-primary btn-sm" onclick="openAddResourceModal()"><i class="ph ph-plus"></i> Add Resource</button>
+    </div>` : '';
+
+    if (resources.length === 0) {
+        c.innerHTML = adminBar + `<div class="empty-state"><div class="empty-state-icon"><i class="ph ph-folder-open"></i></div><h3>No resources yet</h3>${isAdmin ? `<p><button class="btn btn-primary" onclick="openAddResourceModal()"><i class="ph ph-plus"></i> Add Resource</button></p>` : '<p>Resources will appear here once your admin adds them.</p>'}</div>`;
+        return;
+    }
+
+    const pinned = resources.filter(r => r.is_pinned);
+    const rest   = resources.filter(r => !r.is_pinned);
+
+    const renderCard = r => `
+        <div class="th-resource-card">
+            <div style="display:flex;gap:12px;align-items:flex-start;">
+                <div class="th-resource-icon" style="background:${CATEGORY_COLOR[r.category]||'#6b7280'}20;color:${CATEGORY_COLOR[r.category]||'#6b7280'};">
+                    <i class="ph ${CATEGORY_ICON[r.category]||'ph-folder'}"></i>
+                </div>
+                <div style="flex:1;min-width:0;">
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <strong style="font-size:14px;">${escapeHtml(r.title)}</strong>
+                        ${r.is_pinned ? '<span class="th-badge" style="background:#fef3c7;color:#92400e;">📌 Pinned</span>' : ''}
+                        <span class="th-badge" style="background:${CATEGORY_COLOR[r.category]||'#6b7280'}20;color:${CATEGORY_COLOR[r.category]||'#6b7280'};">${r.category}</span>
+                    </div>
+                    ${r.description ? `<div style="font-size:13px;color:#6b7280;margin-top:4px;">${escapeHtml(r.description)}</div>` : ''}
+                    ${r.content_body ? `<div class="th-content-body" style="margin-top:8px;">${escapeHtml(r.content_body)}</div>` : ''}
+                    ${r.phone_number ? `<a href="tel:${escapeHtml(r.phone_number)}" style="display:inline-flex;align-items:center;gap:4px;margin-top:6px;color:#059669;font-weight:600;font-size:14px;"><i class="ph ph-phone"></i> ${escapeHtml(r.phone_number)}</a>` : ''}
+                    ${r.content_url ? `<a href="${escapeHtml(r.content_url)}" target="_blank" rel="noopener" class="btn btn-sm btn-secondary" style="margin-top:8px;display:inline-flex;gap:4px;"><i class="ph ${TYPE_ICON[r.content_type]||'ph-arrow-square-out'}"></i> Open</a>` : ''}
+                    ${isAdmin ? `<div style="margin-top:8px;display:flex;gap:6px;">
+                        <button class="btn btn-sm btn-secondary" onclick="openEditResourceModal('${r.id}')"><i class="ph ph-pencil"></i> Edit</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteResourceUI('${r.id}')"><i class="ph ph-trash"></i></button>
+                    </div>` : ''}
+                </div>
+            </div>
+        </div>`;
+
+    c.innerHTML = adminBar
+        + (pinned.length ? `<h3 style="margin-bottom:10px;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;">📌 Pinned</h3><div class="th-resource-grid">${pinned.map(renderCard).join('')}</div><h3 style="margin:20px 0 10px;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;">All Resources</h3>` : '')
+        + `<div class="th-resource-grid">${rest.map(renderCard).join('')}</div>`;
+}
+
+// ── Emergency Tab ────────────────────────────────────────────────────────────
+
+async function _renderEmergencyTab(c, isAdmin) {
+    const contacts = await getCaregiverResources({ category: 'emergency', activeOnly: !isAdmin });
+    const contactResources = await getCaregiverResources({ category: 'contact', activeOnly: !isAdmin });
+    const all = [...contacts, ...contactResources];
+
+    const adminNote = isAdmin ? `<div style="margin-bottom:16px;padding:10px 14px;background:#fef9c3;border-radius:8px;font-size:13px;border-left:3px solid #d97706;"><strong>Admin:</strong> Edit emergency contacts and protocols in the <button class="notif-action-btn" onclick="switchTrainingTab('resources')">Resources tab</button>.</div>` : '';
+
+    c.innerHTML = `${adminNote}
+        <div style="display:grid;gap:var(--spacing-md);max-width:680px;">
+
+            <div class="th-emergency-card th-emergency-911">
+                <div style="font-size:32px;margin-bottom:8px;">🚨</div>
+                <h2 style="margin:0 0 4px;font-size:20px;">Call 911 First</h2>
+                <p style="margin:0;opacity:0.9;font-size:14px;">For any life-threatening emergency, injury, or immediate danger — call 911 immediately.</p>
+            </div>
+
+            ${all.length ? all.map(r => `
+            <div class="th-emergency-card" style="background:#fff;border:1px solid #e5e7eb;color:#111;">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <div style="font-size:28px;${r.category==='emergency'?'color:#dc2626;':'color:#059669;'}"><i class="ph ${r.category==='contact'?'ph-phone':'ph-warning-octagon'}"></i></div>
+                    <div style="flex:1;">
+                        <strong style="font-size:15px;">${escapeHtml(r.title)}</strong>
+                        ${r.description ? `<div style="font-size:13px;color:#6b7280;margin-top:2px;">${escapeHtml(r.description)}</div>` : ''}
+                        ${r.content_body ? `<div style="font-size:13px;color:#374151;margin-top:6px;line-height:1.5;">${escapeHtml(r.content_body)}</div>` : ''}
+                        ${r.phone_number ? `<a href="tel:${escapeHtml(r.phone_number)}" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;font-size:16px;font-weight:700;color:#059669;"><i class="ph ph-phone-call"></i> ${escapeHtml(r.phone_number)}</a>` : ''}
+                    </div>
+                </div>
+            </div>`).join('') : `
+            <div class="card"><div class="card-body" style="text-align:center;color:#9ca3af;padding:32px;">
+                <i class="ph ph-phone-x" style="font-size:36px;display:block;margin-bottom:8px;"></i>
+                <p>No emergency contacts added yet.${isAdmin ? ' <button class="notif-action-btn" onclick="openAddResourceModal()">Add one in Resources.</button>' : ' Contact your supervisor.'}</p>
+            </div></div>`}
+
+            <div class="th-emergency-card" style="background:#fff;border:1px solid #e5e7eb;color:#111;">
+                <strong style="font-size:15px;display:block;margin-bottom:10px;"><i class="ph ph-clipboard-text" style="color:#7c3aed;"></i> Incident Escalation Protocol</strong>
+                <ol style="margin:0;padding-left:18px;font-size:13px;color:#374151;line-height:2;">
+                    <li>Ensure immediate safety — call 911 if needed</li>
+                    <li>Notify supervisor / agency immediately</li>
+                    <li>Document the incident in a Visit Update</li>
+                    <li>Complete an incident report within 24 hours</li>
+                    <li>Do not discuss with other clients or families</li>
+                </ol>
+            </div>
+        </div>`;
+}
+
+// ── Admin Modals: Training Module ────────────────────────────────────────────
+
+function openAddTrainingModuleModal() {
+    modalTitle.textContent = 'Add Training Module';
+    modalBody.innerHTML = _trainingModuleForm();
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveTrainingModuleModal(null)"><i class="ph ph-floppy-disk"></i> Save</button>`;
+    openModal();
+}
+
+async function openEditTrainingModuleModal(id) {
+    const mods = await getTrainingModules({ activeOnly: false });
+    const m = mods.find(x => x.id === id);
+    if (!m) return;
+    modalTitle.textContent = 'Edit Training Module';
+    modalBody.innerHTML = _trainingModuleForm(m);
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveTrainingModuleModal('${id}')"><i class="ph ph-floppy-disk"></i> Save</button>`;
+    openModal();
+}
+
+function _trainingModuleForm(m = {}) {
+    return `
+        <div class="form-group"><label>Title *</label><input type="text" class="form-control" id="tm-title" value="${escapeHtml(m.title||'')}" placeholder="Module title"></div>
+        <div class="form-group"><label>Description</label><textarea class="form-control" id="tm-desc" rows="2">${escapeHtml(m.description||'')}</textarea></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--spacing-sm);">
+            <div class="form-group"><label>Category</label>
+                <select class="form-select" id="tm-category">
+                    ${['onboarding','safety','clinical','compliance','soft_skills','policy','general'].map(c => `<option value="${c}" ${m.category===c?'selected':''}>${c.replace('_',' ')}</option>`).join('')}
+                </select></div>
+            <div class="form-group"><label>Content Type</label>
+                <select class="form-select" id="tm-type">
+                    ${['document','video','link','quiz','photo_guide'].map(t => `<option value="${t}" ${m.content_type===t?'selected':''}>${t.replace('_',' ')}</option>`).join('')}
+                </select></div>
+        </div>
+        <div class="form-group"><label>Content URL</label><input type="url" class="form-control" id="tm-url" value="${escapeHtml(m.content_url||'')}" placeholder="https://…"></div>
+        <div class="form-group"><label>Content Body</label><textarea class="form-control" id="tm-body" rows="3" placeholder="Text instructions / guide…">${escapeHtml(m.content_body||'')}</textarea></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--spacing-sm);">
+            <div class="form-group"><label>Duration (min)</label><input type="number" class="form-control" id="tm-duration" value="${m.duration_minutes||''}" min="1"></div>
+            <div class="form-group" style="padding-top:24px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="tm-required" style="width:auto;" ${m.is_required?'checked':''}> Required</label></div>
+            <div class="form-group" style="padding-top:24px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="tm-ack" style="width:auto;" ${m.requires_acknowledgement?'checked':''}> Needs Ack</label></div>
+        </div>`;
+}
+
+async function saveTrainingModuleModal(id) {
+    const title = document.getElementById('tm-title')?.value?.trim();
+    if (!title) { CareHubToast.warning('Title is required.'); return; }
+    const mod = {
+        title, description: document.getElementById('tm-desc')?.value?.trim()||null,
+        category: document.getElementById('tm-category')?.value,
+        content_type: document.getElementById('tm-type')?.value,
+        content_url: document.getElementById('tm-url')?.value?.trim()||null,
+        content_body: document.getElementById('tm-body')?.value?.trim()||null,
+        duration_minutes: parseInt(document.getElementById('tm-duration')?.value)||null,
+        is_required: document.getElementById('tm-required')?.checked||false,
+        requires_acknowledgement: document.getElementById('tm-ack')?.checked||false,
+        is_active: true
+    };
+    let ok;
+    if (id) { ok = await updateTrainingModule(id, mod); } else { ok = !!(await createTrainingModule(mod)); }
+    if (ok) { CareHubToast.success(id ? 'Module updated.' : 'Module created.'); closeModal(); await renderTrainingHub(); }
+    else    { CareHubToast.error('Failed to save module.'); }
+}
+
+async function deleteTrainingModuleUI(id) {
+    const confirmed = await CareHubConfirm.confirm({ title:'Delete Module', message:'Delete this training module? All assignments will also be deleted.', confirmText:'Delete', danger:true, icon:'ph-trash' });
+    if (!confirmed) return;
+    const ok = await deleteTrainingModule(id);
+    if (ok) { CareHubToast.success('Module deleted.'); await renderTrainingHub(); }
+    else    { CareHubToast.error('Failed to delete.'); }
+}
+
+// ── Admin Modal: Assign Module ───────────────────────────────────────────────
+
+async function openAssignModuleModal(moduleId, moduleTitle) {
+    const caregivers = await getCaregivers('all');
+    modalTitle.textContent = `Assign: ${moduleTitle}`;
+    modalBody.innerHTML = `
+        <div class="form-group"><label>Caregiver *</label>
+            <select class="form-select" id="assign-cg">
+                <option value="">Select caregiver…</option>
+                ${(caregivers||[]).map(cg => `<option value="${cg.id}">${escapeHtml(cg.name)}</option>`).join('')}
+            </select></div>
+        <div class="form-group"><label>Due Date</label><input type="date" class="form-control" id="assign-due"></div>
+        <div class="form-group"><label>Notes</label><textarea class="form-control" id="assign-notes" rows="2"></textarea></div>`;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveAssignModuleModal('${moduleId}')"><i class="ph ph-user-plus"></i> Assign</button>`;
+    openModal();
+}
+
+async function saveAssignModuleModal(moduleId) {
+    const caregiverId = document.getElementById('assign-cg')?.value;
+    if (!caregiverId) { CareHubToast.warning('Select a caregiver.'); return; }
+    const result = await assignTrainingModule({
+        moduleId, caregiverId,
+        dueDate: document.getElementById('assign-due')?.value||null,
+        notes:   document.getElementById('assign-notes')?.value?.trim()||null
+    });
+    if (result) {
+        await createNotification({ type:'training_assigned', title:'Training Assigned', message:`You have been assigned: training module.`, caregiver_id: caregiverId, recipient_role:'caregiver', priority:'normal', related_table:'training_assignments', related_record_id: result.id });
+        CareHubToast.success('Training assigned.'); closeModal(); await renderTrainingHub();
+    } else { CareHubToast.error('Failed to assign.'); }
+}
+
+// ── Caregiver Actions ────────────────────────────────────────────────────────
+
+async function markTrainingCompleteUI(assignmentId) {
+    const ok = await markTrainingComplete(assignmentId);
+    if (ok) { CareHubToast.success('Marked as complete.'); await renderTrainingHub(); }
+    else    { CareHubToast.error('Failed to update.'); }
+}
+
+async function acknowledgeTrainingUI(assignmentId) {
+    const ok = await acknowledgeTraining(assignmentId);
+    if (ok) { CareHubToast.success('Acknowledged and marked complete.'); await renderTrainingHub(); }
+    else    { CareHubToast.error('Failed to acknowledge.'); }
+}
+
+// ── Admin Modal: Edit Onboarding Checklist ───────────────────────────────────
+
+async function openOnboardingEditModal(caregiverId) {
+    const r = (await getOnboardingChecklist(caregiverId)) || {};
+    const fields = [
+        { key:'profile_completed',          label:'Profile Completed' },
+        { key:'handbook_reviewed',          label:'Handbook Reviewed' },
+        { key:'emergency_policy_reviewed',  label:'Emergency Policy Reviewed' },
+        { key:'timesheet_training_done',    label:'Timesheet Training Done' },
+        { key:'visit_update_training_done', label:'Visit Update Training Done' },
+        { key:'document_upload_done',       label:'Documents Uploaded' },
+        { key:'orientation_completed',      label:'Orientation Completed' },
+    ];
+    modalTitle.textContent = 'Edit Onboarding Checklist';
+    modalBody.innerHTML = `
+        ${fields.map(f => `
+        <div class="form-group" style="margin-bottom:8px;">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;">
+                <input type="checkbox" id="ob-${f.key}" style="width:auto;" ${r[f.key]?'checked':''}> ${f.label}
+            </label>
+        </div>`).join('')}
+        <div class="form-group"><label>Background Check</label>
+            <select class="form-select" id="ob-bgc">
+                ${['pending','submitted','cleared','failed','waived'].map(s => `<option value="${s}" ${r.background_check_status===s?'selected':''}>${s}</option>`).join('')}
+            </select></div>
+        <div class="form-group"><label>Orientation Date</label><input type="date" class="form-control" id="ob-orient-date" value="${r.orientation_date||''}"></div>
+        <div class="form-group"><label>Admin Notes</label><textarea class="form-control" id="ob-notes" rows="2">${escapeHtml(r.notes||'')}</textarea></div>`;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveOnboardingModal('${caregiverId}')"><i class="ph ph-floppy-disk"></i> Save</button>`;
+    openModal();
+}
+
+async function saveOnboardingModal(caregiverId) {
+    const fields = ['profile_completed','handbook_reviewed','emergency_policy_reviewed','timesheet_training_done','visit_update_training_done','document_upload_done','orientation_completed'];
+    const updates = {};
+    fields.forEach(f => { updates[f] = document.getElementById(`ob-${f}`)?.checked||false; });
+    updates.background_check_status = document.getElementById('ob-bgc')?.value||'pending';
+    updates.orientation_date = document.getElementById('ob-orient-date')?.value||null;
+    updates.notes = document.getElementById('ob-notes')?.value?.trim()||null;
+    const ok = await upsertOnboardingChecklist(caregiverId, updates);
+    if (ok) { CareHubToast.success('Checklist saved.'); closeModal(); await renderTrainingHub(); }
+    else    { CareHubToast.error('Failed to save.'); }
+}
+
+// ── Admin Modal: Add/Edit Resource ───────────────────────────────────────────
+
+function openAddResourceModal() {
+    modalTitle.textContent = 'Add Resource';
+    modalBody.innerHTML = _resourceForm();
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveResourceModal(null)"><i class="ph ph-floppy-disk"></i> Save</button>`;
+    openModal();
+}
+
+async function openEditResourceModal(id) {
+    const resources = await getCaregiverResources({ activeOnly: false });
+    const r = resources.find(x => x.id === id);
+    if (!r) return;
+    modalTitle.textContent = 'Edit Resource';
+    modalBody.innerHTML = _resourceForm(r);
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveResourceModal('${id}')"><i class="ph ph-floppy-disk"></i> Save</button>`;
+    openModal();
+}
+
+function _resourceForm(r = {}) {
+    return `
+        <div class="form-group"><label>Title *</label><input type="text" class="form-control" id="res-title" value="${escapeHtml(r.title||'')}" placeholder="Resource title"></div>
+        <div class="form-group"><label>Description</label><textarea class="form-control" id="res-desc" rows="2">${escapeHtml(r.description||'')}</textarea></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--spacing-sm);">
+            <div class="form-group"><label>Category</label>
+                <select class="form-select" id="res-category">
+                    ${['handbook','emergency','policy','contact','mileage','dress_code','communication','incident','general'].map(c=>`<option value="${c}" ${r.category===c?'selected':''}>${c.replace('_',' ')}</option>`).join('')}
+                </select></div>
+            <div class="form-group"><label>Type</label>
+                <select class="form-select" id="res-type">
+                    ${['document','video','link','phone','text_block'].map(t=>`<option value="${t}" ${r.content_type===t?'selected':''}>${t.replace('_',' ')}</option>`).join('')}
+                </select></div>
+        </div>
+        <div class="form-group"><label>URL</label><input type="url" class="form-control" id="res-url" value="${escapeHtml(r.content_url||'')}" placeholder="https://…"></div>
+        <div class="form-group"><label>Phone Number</label><input type="tel" class="form-control" id="res-phone" value="${escapeHtml(r.phone_number||'')}" placeholder="(555) 555-5555"></div>
+        <div class="form-group"><label>Content Body</label><textarea class="form-control" id="res-body" rows="3" placeholder="Text content…">${escapeHtml(r.content_body||'')}</textarea></div>
+        <div style="display:flex;gap:20px;margin-top:4px;">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" id="res-pinned" style="width:auto;" ${r.is_pinned?'checked':''}> Pin to top</label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" id="res-active" style="width:auto;" ${r.is_active!==false?'checked':''}> Active</label>
+        </div>`;
+}
+
+async function saveResourceModal(id) {
+    const title = document.getElementById('res-title')?.value?.trim();
+    if (!title) { CareHubToast.warning('Title is required.'); return; }
+    const resource = {
+        title, description: document.getElementById('res-desc')?.value?.trim()||null,
+        category: document.getElementById('res-category')?.value,
+        content_type: document.getElementById('res-type')?.value,
+        content_url: document.getElementById('res-url')?.value?.trim()||null,
+        phone_number: document.getElementById('res-phone')?.value?.trim()||null,
+        content_body: document.getElementById('res-body')?.value?.trim()||null,
+        is_pinned: document.getElementById('res-pinned')?.checked||false,
+        is_active: document.getElementById('res-active')?.checked!==false
+    };
+    let ok;
+    if (id) { ok = await updateCaregiverResource(id, resource); }
+    else    { ok = !!(await createCaregiverResource(resource)); }
+    if (ok) { CareHubToast.success(id ? 'Resource updated.' : 'Resource added.'); closeModal(); await renderTrainingHub(); }
+    else    { CareHubToast.error('Failed to save resource.'); }
+}
+
+async function deleteResourceUI(id) {
+    const confirmed = await CareHubConfirm.confirm({ title:'Delete Resource', message:'Delete this resource?', confirmText:'Delete', danger:true, icon:'ph-trash' });
+    if (!confirmed) return;
+    const ok = await deleteCaregiverResource(id);
+    if (ok) { CareHubToast.success('Resource deleted.'); await renderTrainingHub(); }
+    else    { CareHubToast.error('Failed to delete.'); }
+}
+
+window.renderTrainingHub = renderTrainingHub;
+window.switchTrainingTab = switchTrainingTab;
+window.openAddTrainingModuleModal = openAddTrainingModuleModal;
+window.openEditTrainingModuleModal = openEditTrainingModuleModal;
+window.saveTrainingModuleModal = saveTrainingModuleModal;
+window.deleteTrainingModuleUI = deleteTrainingModuleUI;
+window.openAssignModuleModal = openAssignModuleModal;
+window.saveAssignModuleModal = saveAssignModuleModal;
+window.markTrainingCompleteUI = markTrainingCompleteUI;
+window.acknowledgeTrainingUI = acknowledgeTrainingUI;
+window.openOnboardingEditModal = openOnboardingEditModal;
+window.saveOnboardingModal = saveOnboardingModal;
+window.openAddResourceModal = openAddResourceModal;
+window.openEditResourceModal = openEditResourceModal;
+window.saveResourceModal = saveResourceModal;
+window.deleteResourceUI = deleteResourceUI;
+window.renderNotifications = renderNotifications;
+window._applyNotifFilter = _applyNotifFilter;
+window._loadNotificationsContent = _loadNotificationsContent;
 window.denyApplication = denyApplication;
 window.denyCareRequest = denyCareRequest;
 window.addCareRequestAdminNotes = addCareRequestAdminNotes;

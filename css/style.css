@@ -215,6 +215,399 @@ body {
     background: #4F46E5;
 }
 
+/* ── Sidebar footer: allow bell button to show without clipping ───────────── */
+.sidebar-footer .user-info {
+    overflow: visible !important;
+}
+
+/* ── Notification Bell ────────────────────────────────────────────────────── */
+.notif-bell-btn {
+    position: relative;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 50%;
+    color: var(--text-secondary, #6b7280);
+    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+}
+
+.notif-bell-btn:hover {
+    background: var(--bg-hover, rgba(0,0,0,0.06));
+    color: var(--warm-accent);
+}
+
+.notif-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    background: #dc2626;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    padding: 0 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    pointer-events: none;
+}
+
+/* ── Notification Dropdown (portal — appended to document.body) ───────────── */
+.notif-dropdown {
+    display: none;
+    position: fixed;        /* portal: coordinates set by JS via getBoundingClientRect */
+    width: 360px;           /* overridden by JS _positionPortal() */
+    max-height: 420px;      /* overridden by JS _positionPortal() */
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08);
+    z-index: 9999;
+    transform-origin: bottom left;
+    animation: none;
+}
+
+.notif-dropdown--open {
+    display: block;
+    animation: notifDropIn 0.18s ease-out;
+}
+
+@keyframes notifDropIn {
+    from { opacity: 0; transform: scale(0.95) translateY(6px); }
+    to   { opacity: 1; transform: scale(1)    translateY(0);   }
+}
+
+.notif-dropdown-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 13px;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+    background: var(--bg-card, #fff);
+    z-index: 1;
+}
+
+.notif-action-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--warm-accent);
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: background 0.1s;
+}
+
+.notif-action-btn:hover { background: var(--bg-hover, #f5f0eb); }
+
+.notif-list { padding: 4px 0; }
+
+.notif-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-light);
+    cursor: pointer;
+    transition: background 0.12s;
+    position: relative;
+}
+
+.notif-item:last-child { border-bottom: none; }
+.notif-item:hover { background: var(--bg-hover, #faf7f4); }
+
+.notif-item-icon {
+    font-size: 18px;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.notif-item-body { flex: 1; min-width: 0; }
+
+.notif-item-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.notif-item-msg {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.notif-item-time {
+    font-size: 11px;
+    color: var(--warm-muted);
+    margin-top: 3px;
+}
+
+.notif-dismiss {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--warm-muted);
+    padding: 2px 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+
+.notif-item:hover .notif-dismiss { opacity: 1; }
+.notif-dismiss:hover { background: #fee2e2; color: #dc2626; }
+
+/* ── Notifications Page ───────────────────────────────────────────────────── */
+.notif-row--unread td {
+    background: var(--bg-highlight, #fefce8) !important;
+    font-weight: 500;
+}
+
+/* ── Training Hub ─────────────────────────────────────────────────────────── */
+
+/* Tab nav */
+.tab-nav {
+    display: flex;
+    gap: 4px;
+    border-bottom: 2px solid var(--border-light, #e5e7eb);
+    padding-bottom: 0;
+}
+
+.tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary, #6b7280);
+    cursor: pointer;
+    border-radius: 6px 6px 0 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+}
+
+.tab-btn:hover { color: var(--warm-accent, #b45309); }
+.tab-btn.active { color: var(--warm-accent, #b45309); border-bottom-color: var(--warm-accent, #b45309); font-weight: 600; }
+
+/* Module grid */
+.th-module-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: var(--spacing-md, 16px);
+}
+
+.th-module-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 16px;
+    transition: box-shadow 0.15s;
+}
+
+.th-module-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+
+.th-module-card.th-required {
+    border-left: 3px solid #d97706;
+}
+
+.th-module-icon {
+    width: 38px;
+    height: 38px;
+    background: var(--bg-hover, #faf7f4);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    color: var(--warm-accent, #b45309);
+    flex-shrink: 0;
+}
+
+.th-content-body {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: #f9fafb;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #374151;
+    line-height: 1.5;
+    white-space: pre-line;
+}
+
+/* Status dot */
+.th-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+    margin-right: 4px;
+}
+
+/* Badges */
+.th-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.4;
+}
+
+.th-badge-required {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+/* Resource grid */
+.th-resource-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--spacing-md, 16px);
+}
+
+.th-resource-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 16px;
+    transition: box-shadow 0.15s;
+}
+
+.th-resource-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+
+.th-resource-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+}
+
+/* Onboarding checklist rows */
+.th-checklist-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid #f3f4f6;
+}
+
+.th-checklist-row:last-child { border-bottom: none; }
+
+.th-checklist-done span {
+    color: #16a34a;
+}
+
+/* Emergency cards */
+.th-emergency-card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.th-emergency-911 {
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: #fff;
+    text-align: center;
+    box-shadow: 0 4px 20px rgba(220,38,38,0.3);
+}
+
+/* Mobile adjustments */
+@media (max-width: 768px) {
+    .th-module-grid,
+    .th-resource-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .tab-btn {
+        padding: 6px 10px;
+        font-size: 12px;
+    }
+}
+
+/* ── Schedule Builder ─────────────────────────────────────────────────────── */
+.sb-layout {
+    display: grid;
+    grid-template-columns: 1fr 1.2fr 1fr;
+    gap: var(--spacing-md);
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .sb-layout {
+        grid-template-columns: 1fr 1fr;
+    }
+    .sb-panel--center {
+        grid-column: 1 / -1;
+        order: -1;
+    }
+}
+
+@media (max-width: 700px) {
+    .sb-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+.sb-suggestion {
+    padding: 10px 12px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    margin-bottom: 8px;
+    background: var(--bg-card);
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.sb-suggestion:hover:not(.sb-suggestion--blocked) {
+    background: var(--bg-hover, #f8f5f0);
+    border-color: var(--warm-accent);
+}
+
+.sb-suggestion--blocked {
+    opacity: 0.55;
+    background: var(--bg-muted, #f9f9f9);
+}
+
+.required {
+    color: #dc2626;
+    font-size: 0.85em;
+    margin-left: 2px;
+}
+
 .btn-sm {
     padding: var(--spacing-sm) var(--spacing-md);
     font-size: 0.875rem;

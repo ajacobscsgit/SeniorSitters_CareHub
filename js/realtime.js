@@ -31,16 +31,17 @@ window.CareHubRealtime = (function() {
         }
 
         // Subscribe to all relevant tables
-        subscribeToTable(TABLES.APPLICATIONS, handleApplicationChange);
+        subscribeToTable(TABLES.APPLICATIONS,  handleApplicationChange);
         subscribeToTable(TABLES.CARE_REQUESTS, handleCareRequestChange);
-        subscribeToTable(TABLES.CAREGIVERS, handleCaregiverChange);
-        subscribeToTable(TABLES.CLIENTS, handleClientChange);
-        subscribeToTable(TABLES.SCHEDULES, handleScheduleChange);
-        subscribeToTable(TABLES.TIMESHEETS, handleTimesheetChange);
+        subscribeToTable(TABLES.CAREGIVERS,    handleCaregiverChange);
+        subscribeToTable(TABLES.CLIENTS,       handleClientChange);
+        subscribeToTable(TABLES.SCHEDULES,     handleScheduleChange);
+        subscribeToTable(TABLES.TIMESHEETS,    handleTimesheetChange);
         subscribeToTable(TABLES.VISIT_UPDATES, handleVisitUpdateChange);
+        subscribeToTable(TABLES.NOTIFICATIONS, handleNotificationChange);
 
         initialized = true;
-        console.log('[CareHubRealtime] All subscriptions initialized');
+        if (window.DEBUG) console.log('[CareHubRealtime] All subscriptions initialized');
         return true;
     }
 
@@ -69,12 +70,12 @@ window.CareHubRealtime = (function() {
                     table: table 
                 }, 
                 (payload) => {
-                    console.log(`[CareHubRealtime] ${table} change:`, payload.eventType, payload.new?.id || payload.old?.id);
+                    if (window.DEBUG) console.log(`[CareHubRealtime] ${table} change:`, payload.eventType, payload.new?.id || payload.old?.id);
                     handler(payload);
                 }
             )
             .subscribe((status) => {
-                console.log(`[CareHubRealtime] ${channelName} status:`, status);
+                if (window.DEBUG) console.log(`[CareHubRealtime] ${channelName} status:`, status);
             });
 
         channels.set(channelName, channel);
@@ -259,6 +260,29 @@ window.CareHubRealtime = (function() {
         }
         
         refreshDashboardStats();
+    }
+
+    /**
+     * Handle notifications table changes — drives bell badge, dropdown, and toast.
+     */
+    function handleNotificationChange(payload) {
+        const { eventType, new: n } = payload;
+        if (window.DEBUG) console.log('[CareHubRealtime] Notification change:', eventType, n?.id);
+
+        if (eventType === 'INSERT' && n) {
+            // Increment badge immediately without a DB round-trip
+            window.CareHubNotifications?.incrementBadge();
+
+            // Show toast for high/emergency priority
+            if (n.priority === 'emergency') {
+                window.CareHubToast?.error(`🚨 ${n.title}: ${n.message}`);
+            } else if (n.priority === 'high') {
+                window.CareHubToast?.warning(`${n.title}: ${n.message}`);
+            }
+        }
+
+        // Always refresh badge count and dropdown
+        window.CareHubNotifications?.refresh();
     }
 
     // ==================== HELPERS ====================
