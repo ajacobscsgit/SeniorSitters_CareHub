@@ -68,6 +68,24 @@ function initApp() {
     // Load initial page
     loadPage('dashboard');
 
+    // Caregiver portal gate: force training completion before normal dashboard
+    try {
+        const session = getSession();
+        if (session && session.role === 'caregiver') {
+            const caregiverId = session.caregiver_id || null;
+            if (caregiverId && typeof isCaregiverTrainingComplete === 'function') {
+                const ok = await isCaregiverTrainingComplete(caregiverId);
+                if (!ok) {
+                    // Redirect caregiver to Training Hub
+                    if (typeof showToast === 'function') showToast('Please complete Level 1 Orientation before client visits can begin.','warning');
+                    loadPage('training-hub');
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('[Init] training gate check failed', e);
+    }
+
     // Init notification bell badge
     setTimeout(() => {
         if (window.CareHubNotifications) window.CareHubNotifications.refresh();
@@ -812,6 +830,20 @@ async function renderDashboard() {
         </div>
     `;
 
+    // Insert training summary card for admin roles
+    const trainingSummaryEl = document.querySelector('.cc-right-col');
+    if (trainingSummaryEl && (getCurrentRole && (getCurrentRole() === 'admin_owner' || getCurrentRole() === 'co_owner'))) {
+        const node = document.createElement('div');
+        node.className = 'cc-card';
+        node.innerHTML = `
+            <div class="cc-card-header"><div class="cc-card-title"><i class="ph ph-graduation-cap"></i> Training Summary</div></div>
+            <div class="cc-card-body" id="trainingSummary">
+                <div>Loading training summary...</div>
+            </div>
+        `;
+        trainingSummaryEl.insertBefore(node, trainingSummaryEl.querySelector('.cc-card'));
+    }
+
     // For restricted roles, also fetch their personal timesheets and visit updates
     // so scopeDashboardStats can produce accurate personal KPI counts.
     const isFullAccess = window.RoleFilter ? window.RoleFilter._isFullAccess() : true;
@@ -859,6 +891,28 @@ async function renderDashboard() {
         miniCal.dataset.monthOffset = '0';
     }
     renderMiniCalendarV2();
+
+    // Render training summary counts (admin only)
+    try {
+        if (typeof getTrainingSummaryCounts === 'function') {
+            const tEl = document.getElementById('trainingSummary');
+            if (tEl) {
+                const counts = await getTrainingSummaryCounts();
+                const needing = await getCaregiversNeedingTraining(6);
+                tEl.innerHTML = `
+                    <div style="font-weight:600">Total caregivers: ${counts.totalCaregivers}</div>
+                    <div>Passed: ${counts.trainingPassed}</div>
+                    <div>Failed: ${counts.trainingFailed}</div>
+                    <div style="margin-top:8px;font-weight:600">Caregivers needing training</div>
+                    <div style="margin-top:6px">
+                        ${needing.slice(0,6).map(c=>`<div>${escapeHtml(c.name || '')} <span style="color:var(--text-secondary)">${escapeHtml(c.email||'')}</span></div>`).join('')}
+                    </div>
+                `;
+            }
+        }
+    } catch (e) {
+        console.warn('[CareHub] Could not render training summary', e);
+    }
     
     renderOnboardingV2(onboarding);
 }
@@ -3906,7 +3960,7 @@ function _renderCaregiverOverviewTab(cg) {
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Training</div>
-                    <div class="detail-value">${renderStatusBadge(cg.training_status || 'pending')}</div>
+                    <div class="detail-value"><span id="trainingBadge-${cg.id}">${renderStatusBadge(cg.training_status || 'pending')}</span></div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Account</div>
@@ -3945,6 +3999,8 @@ async function _loadCaregiverProfileTab(caregiverId, isAdmin) {
     switch (_caregiverProfileTab) {
         case 'overview':
             container.innerHTML = _renderCaregiverOverviewTab(caregiver);
+            // update training badge async
+            (async () => { await updateCaregiverTrainingBadge(caregiver.id); })();
             break;
         case 'training':
             container.innerHTML = await _renderCaregiverTrainingTab(caregiver, isAdmin);
@@ -3967,6 +4023,25 @@ async function _loadCaregiverProfileTab(caregiverId, isAdmin) {
         case 'notes':
             container.innerHTML = _renderCaregiverNotesTab(caregiver, isAdmin);
             break;
+    }
+}
+
+/**
+ * Update the training badge in caregiver overview section
+ * @param {string} caregiverId
+ */
+async function updateCaregiverTrainingBadge(caregiverId) {
+    const el = document.getElementById(`trainingBadge-${caregiverId}`);
+    if (!el) return;
+    try {
+        const ok = await isCaregiverTrainingComplete(caregiverId);
+        if (ok) {
+            el.innerHTML = `<span class="th-badge th-badge-required" title="Level 1 Orientation: Complete">Training Complete</span>`;
+        } else {
+            el.innerHTML = `<span style="color:#b45309;font-weight:600">Training Incomplete</span>`;
+        }
+    } catch (e) {
+        console.warn('[CareHub] updateCaregiverTrainingBadge error', e);
     }
 }
 

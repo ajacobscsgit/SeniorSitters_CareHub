@@ -1096,6 +1096,174 @@ async function getDashboardStats() {
     }
 }
 
+// ==================== TRAINING PROGRESS ====================
+/**
+ * Get a user's training progress for a module
+ * @param {string} userId
+ * @param {string} moduleId
+ * @returns {Promise<Object|null>}
+ */
+async function getTrainingProgress(userId, moduleId) {
+    if (!supabaseClient) return null;
+    try {
+        const { data, error } = await supabaseClient
+            .from('training_progress')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('module_id', moduleId)
+            .maybeSingle();
+        if (error) {
+            console.error('[CareHub] getTrainingProgress error:', error.message);
+            return null;
+        }
+        return data || null;
+    } catch (e) {
+        console.error('[CareHub] getTrainingProgress exception:', e);
+        return null;
+    }
+}
+
+/**
+ * Upsert a training progress row. onConflict set to user_id,module_id in DB migration.
+ * @param {Object} row
+ * @returns {Promise<boolean|Object>} returns inserted/updated row or false on error
+ */
+async function upsertTrainingProgress(row) {
+    if (!supabaseClient) return false;
+    try {
+        const payload = {
+            user_id: row.user_id,
+            module_id: row.module_id,
+            module_name: row.module_name || null,
+            status: row.status || 'in_progress',
+            score: typeof row.score === 'number' ? row.score : null,
+            attempts: typeof row.attempts === 'number' ? row.attempts : 0,
+            started_at: row.started_at || null,
+            completed_at: row.completed_at || null,
+            last_accessed_at: row.last_accessed_at || new Date().toISOString(),
+            section_progress: row.section_progress || null
+        };
+
+        const { data, error } = await supabaseClient
+            .from('training_progress')
+            .upsert(payload, { onConflict: ['user_id', 'module_id'] })
+            .select()
+            .maybeSingle();
+
+        if (error) {
+            console.error('[CareHub] upsertTrainingProgress error:', error.message);
+            return false;
+        }
+        return data || true;
+    } catch (e) {
+        console.error('[CareHub] upsertTrainingProgress exception:', e);
+        return false;
+    }
+}
+
+// Expose training helpers for other modules
+window.getTrainingProgress = getTrainingProgress;
+window.upsertTrainingProgress = upsertTrainingProgress;
+
+/**
+ * Get profile row by caregiver id (profiles.caregiver_id)
+ * @param {string} caregiverId
+ * @returns {Promise<Object|null>}
+ */
+async function getProfileByCaregiverId(caregiverId) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from('profiles')
+        .select('*')
+        .eq('caregiver_id', caregiverId)
+        .limit(1)
+        .maybeSingle();
+    if (error) {
+        console.error('[CareHub] getProfileByCaregiverId error:', error.message);
+        return null;
+    }
+    return data || null;
+}
+
+/**
+ * Check whether a caregiver (by caregivers.id) has passed Level 1 Orientation
+ * @param {string} caregiverId - caregivers.id
+ * @returns {Promise<boolean>}
+ */
+async function isCaregiverTrainingComplete(caregiverId) {
+    if (!supabaseClient) return false;
+    try {
+        const profile = await getProfileByCaregiverId(caregiverId);
+        if (!profile || !profile.id) return false;
+        const { data, error } = await supabaseClient
+            .from('training_progress')
+            .select('*')
+            .eq('user_id', profile.id)
+            .eq('module_id', 'level_1_orientation')
+            .limit(1)
+            .maybeSingle();
+        if (error) {
+            console.error('[CareHub] isCaregiverTrainingComplete error:', error.message);
+            return false;
+        }
+        const row = data;
+        if (!row) return false;
+        return row.status === 'passed' && row.score >= 80 && row.completed_at !== null;
+    } catch (e) {
+        console.error('[CareHub] isCaregiverTrainingComplete exception:', e);
+        return false;
+    }
+}
+
+// Expose helpers
+window.getProfileByCaregiverId = getProfileByCaregiverId;
+window.isCaregiverTrainingComplete = isCaregiverTrainingComplete;
+
+/**
+ * Get training summary counts for admin dashboard
+ * @returns {Promise<Object>}
+ */
+async function getTrainingSummaryCounts() {
+    if (!supabaseClient) return { totalCaregivers: 0, trainingPassed: 0, trainingFailed: 0 };
+    try {
+        const [{ count: totalCaregivers }, { count: trainingPassed }, { count: trainingFailed }] = await Promise.all([
+            supabaseClient.from(TABLES.CAREGIVERS).select('id', { count: 'exact', head: true }),
+            supabaseClient.from('training_progress').select('id', { count: 'exact', head: true }).eq('module_id', 'level_1_orientation').eq('status', 'passed'),
+            supabaseClient.from('training_progress').select('id', { count: 'exact', head: true }).eq('module_id', 'level_1_orientation').eq('status', 'failed')
+        ]);
+        return { totalCaregivers: totalCaregivers || 0, trainingPassed: trainingPassed || 0, trainingFailed: trainingFailed || 0 };
+    } catch (e) {
+        console.error('[CareHub] getTrainingSummaryCounts error:', e);
+        return { totalCaregivers: 0, trainingPassed: 0, trainingFailed: 0 };
+    }
+}
+
+/**
+ * Return up to `limit` caregivers who need training (not passed)
+ * @param {number} limit
+ */
+async function getCaregiversNeedingTraining(limit = 20) {
+    if (!supabaseClient) return [];
+    try {
+        const caregivers = await getCaregivers();
+        const needs = [];
+        for (const cg of caregivers) {
+            const ok = await isCaregiverTrainingComplete(cg.id);
+            if (!ok) {
+                needs.push(cg);
+                if (needs.length >= limit) break;
+            }
+        }
+        return needs;
+    } catch (e) {
+        console.error('[CareHub] getCaregiversNeedingTraining error:', e);
+        return [];
+    }
+}
+
+window.getTrainingSummaryCounts = getTrainingSummaryCounts;
+window.getCaregiversNeedingTraining = getCaregiversNeedingTraining;
+
 /**
  * Get today's schedule with caregiver and client details
  * @returns {Promise<Array>}
@@ -1615,6 +1783,21 @@ async function getScheduleById(id) {
  */
 async function createSchedule(scheduleData) {
     if (!supabaseClient) return null;
+
+    // Training gate: if a caregiver is specified, ensure they completed Level 1
+    if (scheduleData.caregiver_id) {
+        try {
+            const eligible = await isCaregiverTrainingComplete(scheduleData.caregiver_id);
+            if (!eligible) {
+                if (typeof window.showToast === 'function') {
+                    window.showToast('This caregiver must complete training before visits can be scheduled.', 'error');
+                }
+                return null;
+            }
+        } catch (e) {
+            console.warn('[CareHub] Training eligibility check failed, proceeding with caution', e);
+        }
+    }
 
     const schedule = {
         caregiver_id: scheduleData.caregiver_id,
@@ -3633,6 +3816,19 @@ async function getAssignmentById(id) {
  */
 async function createClientCaregiverAssignment({ clientId, caregiverId, status = 'active', startDate = null, endDate = null, assignedBy = null, notes = null }, { sendNotification = true } = {}) {
     if (!supabaseClient) return null;
+
+    // Training gate: require Level 1 Orientation passed for active assignments
+    try {
+        const eligible = await isCaregiverTrainingComplete(caregiverId);
+        if (!eligible && status === 'active') {
+            if (typeof window.showToast === 'function') {
+                window.showToast('This caregiver must pass Level 1 Orientation before being assigned to clients.', 'error');
+            }
+            return null;
+        }
+    } catch (e) {
+        console.warn('[CareHub] Training eligibility check failed, proceeding with caution', e);
+    }
 
     const row = {
         client_id: clientId,
