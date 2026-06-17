@@ -41,10 +41,22 @@
         try { alert(msg); } catch (e) { console.log(type || 'info', msg); }
     }
 
+    // Flag to prevent re-entrant renders
+    let _rendering = false;
+
     // Render the training hub module
-    async function renderTrainingHub() {
-        // Require auth/role
-        if (!requireRole(['admin_owner','co_owner','caregiver'])) return;
+    async function renderTrainingHubPage() {
+        // Prevent recursive re-entry
+        if (_rendering) return;
+        _rendering = true;
+
+        // Require auth/role — but do NOT redirect away from training-hub
+        const role = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
+        const allowed = ['admin_owner','co_owner','caregiver'];
+        if (!role || !allowed.includes(role)) {
+            _rendering = false;
+            return;
+        }
 
         const main = document.getElementById('mainContent');
         main.innerHTML = `
@@ -118,17 +130,20 @@
 
         // Hook mark complete buttons
         container.querySelectorAll('.th-mark-complete').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
+            btn.addEventListener('click', async () => {
                 const sectionId = btn.dataset.section;
                 btn.disabled = true;
-                // update local UI
+                btn.textContent = 'Completed';
                 const now = new Date().toISOString();
                 sectionProgress[sectionId] = { completed_at: now };
                 await saveProgress({ section_progress: sectionProgress, userId });
-                // update sidebar progress dot
-                const dots = document.querySelectorAll('#thProgressList .th-checklist-row');
-                // re-render entire module to reflect state simply
-                renderTrainingHub();
+                // Update sidebar dot in-place — no full re-render
+                const allDots = document.querySelectorAll('#thProgressList .th-checklist-row .th-status-dot');
+                const secIndex = SECTIONS.findIndex(s => s.id === sectionId);
+                if (secIndex >= 0 && allDots[secIndex]) {
+                    allDots[secIndex].style.background = '#16a34a';
+                    allDots[secIndex].closest('.th-checklist-row')?.classList.add('th-checklist-done');
+                }
             });
         });
 
@@ -151,14 +166,18 @@
 
         // Show quiz status
         const quizStatus = document.getElementById('thQuizStatus');
-        if (progress && progress.status === 'passed') {
-            quizStatus.innerHTML = `Module completed • Score: ${progress.score}%`;
-            showCertificate(progress.score);
-        } else if (progress && progress.status === 'failed') {
-            quizStatus.innerHTML = `Quiz attempted • Last score: ${progress.score}% • Attempts: ${progress.attempts || 0}`;
-        } else if (progress && progress.attempts) {
-            quizStatus.innerHTML = `Quiz attempts: ${progress.attempts}`;
+        if (quizStatus) {
+            if (progress && progress.status === 'passed') {
+                quizStatus.innerHTML = `Module completed &bull; Score: ${progress.score}%`;
+                showCertificate(progress.score);
+            } else if (progress && progress.status === 'failed') {
+                quizStatus.innerHTML = `Quiz attempted &bull; Last score: ${progress.score}% &bull; Attempts: ${progress.attempts || 0}`;
+            } else if (progress && progress.attempts) {
+                quizStatus.innerHTML = `Quiz attempts: ${progress.attempts}`;
+            }
         }
+
+        _rendering = false;
     }
 
     async function saveProgress({ section_progress = {}, userId }) {
@@ -255,7 +274,9 @@
                 return;
             }
 
-            // Show results
+            // Show results in-place — no full re-render (prevents loop)
+            const quizCard = document.getElementById('thQuizCard');
+            if (quizCard) quizCard.style.display = 'none';
             const resultCard = document.getElementById('thResultCard');
             resultCard.style.display = 'block';
             resultCard.innerHTML = `
@@ -268,22 +289,22 @@
                 </div>
             `;
 
-            // If passed, show certificate style message
+            // Update quiz status label in-place
+            const qs = document.getElementById('thQuizStatus');
+            if (qs) qs.innerHTML = passed
+                ? `Module completed &bull; Score: ${score}%`
+                : `Quiz attempted &bull; Last score: ${score}% &bull; Attempts: ${attempts}`;
+
             if (passed) showCertificate(score);
 
             document.getElementById('retakeQuizBtn').addEventListener('click', () => {
-                // allow retake: simply show quiz again
                 showQuizCard();
                 resultCard.style.display = 'none';
             });
-
-            // Refresh module render
-            renderTrainingHub();
         });
     }
 
     function showCertificate(score) {
-        const main = document.getElementById('mainContent');
         const certHtml = `
             <div class="th-resource-card" style="margin-top:16px;background:linear-gradient(90deg,#ffffff,#f7fffb);">
                 <h3>Completion Certificate</h3>
@@ -293,10 +314,19 @@
             </div>
         `;
         const rc = document.getElementById('thResultCard');
-        if (rc) rc.innerHTML = certHtml; rc.style.display = 'block';
+        if (rc) { rc.innerHTML = certHtml; rc.style.display = 'block'; }
     }
 
-    // Helpful global binding for router
-    window.renderTrainingHub = renderTrainingHub;
+    // Export as a distinct name — app.js owns 'renderTrainingHub' for the
+    // new DB-driven Training Hub. This file's Level-1 orientation page is
+    // exposed as renderTrainingHubPage so loadPage('training-hub') can call
+    // whichever version is appropriate.
+    window.renderTrainingHubPage = renderTrainingHubPage;
+
+    // Only set renderTrainingHub if app.js has NOT already defined it
+    // (app.js loads AFTER training-hub.js, so this will be overwritten — that's fine).
+    if (typeof window.renderTrainingHub === 'undefined') {
+        window.renderTrainingHub = renderTrainingHubPage;
+    }
 
 })();

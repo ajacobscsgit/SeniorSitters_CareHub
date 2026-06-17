@@ -13,10 +13,11 @@ create table if not exists public.training_modules (
     category        text not null default 'general'
         check (category in ('onboarding','safety','clinical','compliance','soft_skills','policy','general')),
     content_type    text not null default 'document'
-        check (content_type in ('document','video','link','quiz','photo_guide')),
+        check (content_type in ('document','video','link','quiz','photo_guide','mixed')),
     content_url     text,
     content_body    text,
     thumbnail_url   text,
+    image_url       text,
     duration_minutes int,
     is_required     boolean not null default false,
     requires_acknowledgement boolean not null default false,
@@ -193,3 +194,17 @@ insert into public.caregiver_resources (title, description, category, content_ty
     ('Dress Code', 'Professional, clean attire is required for all client visits.', 'dress_code', 'text_block', 'Wear comfortable, professional clothing. No strong perfumes. Closed-toe shoes recommended. ID badge must be visible.', false, 12),
     ('Client Communication Rules', 'Guidelines for communicating with clients and their families.', 'communication', 'text_block', 'Always be respectful and patient. Do not discuss other clients. Report family concerns to your supervisor.', false, 13)
 on conflict do nothing;
+
+-- ── 9. Patch: add image_url + mixed content_type (safe to re-run) ────────────
+-- If the table was already created without image_url, add it now.
+alter table public.training_modules
+    add column if not exists image_url text;
+
+-- Drop the old check constraint and recreate it with 'mixed' included.
+-- The constraint name Postgres auto-generates is training_modules_content_type_check.
+alter table public.training_modules
+    drop constraint if exists training_modules_content_type_check;
+
+alter table public.training_modules
+    add constraint training_modules_content_type_check
+        check (content_type in ('document','video','link','quiz','photo_guide','mixed'));

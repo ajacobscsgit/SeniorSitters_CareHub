@@ -150,13 +150,33 @@
     <script>
         // Protect route - check auth immediately
         document.addEventListener('DOMContentLoaded', async function() {
+            // Safety timeout: if loading state persists > 10 s, unblock the UI
+            const loadingEl = document.getElementById('authLoading');
+            const safetyTimer = setTimeout(function() {
+                const mc = document.getElementById('mainContent');
+                if (mc && mc.querySelector('#authLoading, .loading-state')) {
+                    mc.innerHTML = `
+                        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;gap:16px;padding:32px;text-align:center;">
+                            <i class="ph ph-warning-octagon" style="font-size:48px;color:#d97706;"></i>
+                            <h2 style="margin:0;">Loading timed out</h2>
+                            <p style="color:#6b7280;max-width:400px;">The app took too long to load. This may be a network or authentication issue.</p>
+                            <div style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center;">
+                                <button onclick="location.reload()" class="btn btn-primary">Reload</button>
+                                <a href="login.html" class="btn btn-secondary">Return to Login</a>
+                            </div>
+                        </div>`;
+                }
+            }, 10000);
+
             // Hydrate session from live Supabase token (no-op in DEV_MODE)
             if (typeof initAuth === 'function') await initAuth();
             if (!requireAuth()) {
+                clearTimeout(safetyTimer);
                 // Redirect handled in requireAuth
                 return;
             }
-            // Auth passed, app.js will initialize
+            // Auth passed, app.js will initialize via its own DOMContentLoaded listener
+            clearTimeout(safetyTimer);
         });
     </script>
 </body>

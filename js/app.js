@@ -18,7 +18,7 @@ const modalFooter = document.getElementById('modalFooter');
 
 // Initialize App - only after auth is verified
 // Note: Auth check happens in index.html, this runs after
-function initApp() {
+async function initApp() {
     // Guard: Check if auth system is initialized
     if (typeof isAuthenticated !== 'function') {
         console.error('[Init] Auth system not initialized. Cannot start app.');
@@ -68,23 +68,11 @@ function initApp() {
     // Load initial page
     loadPage('dashboard');
 
-    // Caregiver portal gate: force training completion before normal dashboard
-    try {
-        const session = getSession();
-        if (session && session.role === 'caregiver') {
-            const caregiverId = session.caregiver_id || null;
-            if (caregiverId && typeof isCaregiverTrainingComplete === 'function') {
-                const ok = await isCaregiverTrainingComplete(caregiverId);
-                if (!ok) {
-                    // Redirect caregiver to Training Hub
-                    if (typeof showToast === 'function') showToast('Please complete Level 1 Orientation before client visits can begin.','warning');
-                    loadPage('training-hub');
-                }
-            }
-        }
-    } catch (e) {
-        console.warn('[Init] training gate check failed', e);
-    }
+    // ── Caregiver training gate ──────────────────────────────────────────────
+    // ONLY redirect caregivers who have a linked caregiver_id AND have NOT
+    // passed Level 1 Orientation. Admins and co_owners are NEVER gated.
+    // The training page itself is also excluded to prevent redirect loops.
+    _runTrainingGate();
 
     // Init notification bell badge
     setTimeout(() => {
@@ -92,6 +80,66 @@ function initApp() {
     }, 1500);
 
     if (DEBUG) console.log('[CareHub] Operating system initialized');
+}
+
+/**
+ * Training gate — async, isolated, never throws, never blocks app init.
+ * Only fires for caregivers; safe to call multiple times.
+ */
+async function _runTrainingGate() {
+    try {
+        const session = typeof getSession === 'function' ? getSession() : null;
+        if (!session) return;
+
+        const role = (typeof normalizeRole === 'function') ? normalizeRole(session.role) : session.role;
+        console.log('[TrainingGate] role:', role);
+
+        // Only gate caregivers
+        if (role !== 'caregiver') {
+            console.log('[TrainingGate] Not a caregiver — no gate applied.');
+            return;
+        }
+
+        // Never redirect away from training page itself
+        if (currentPage === 'training-hub') {
+            console.log('[TrainingGate] Already on training-hub — skipping gate.');
+            return;
+        }
+
+        const caregiverId = session.caregiver_id || null;
+        if (!caregiverId) {
+            console.log('[TrainingGate] No caregiver_id yet — skipping gate (will resolve on next navigation).');
+            return;
+        }
+
+        if (typeof isCaregiverTrainingComplete !== 'function') {
+            console.log('[TrainingGate] isCaregiverTrainingComplete not available — skipping gate.');
+            return;
+        }
+
+        // Race the DB check against a 5 s timeout so the app never hangs
+        let ok;
+        try {
+            ok = await Promise.race([
+                isCaregiverTrainingComplete(caregiverId),
+                new Promise(resolve => setTimeout(() => resolve(true), 5000)) // fail-open on timeout
+            ]);
+        } catch (e) {
+            console.warn('[TrainingGate] isCaregiverTrainingComplete threw:', e);
+            ok = true; // fail-open — never block the app on a DB error
+        }
+
+        console.log('[TrainingGate] trainingComplete:', ok);
+
+        if (!ok && currentPage !== 'training-hub') {
+            if (typeof CareHubToast !== 'undefined') {
+                CareHubToast.warning('Please complete Level 1 Orientation before using the portal.');
+            }
+            loadPage('training-hub');
+        }
+    } catch (e) {
+        console.warn('[TrainingGate] Gate check failed silently — app continues normally:', e);
+    }
 }
 
 // Initialize state subscriptions for reactive UI updates
@@ -1459,6 +1507,15 @@ function navigateTo(page) {
     if (typeof canAccessPage === 'function' && !canAccessPage(page)) {
         if (DEBUG) console.log(`[Navigation] Access denied to ${page}, redirecting to dashboard`);
         page = 'dashboard'; // Fall back to dashboard
+    }
+
+    // Training gate: caregivers must stay on training-hub until complete.
+    // Only block non-training destinations; always allow training-hub itself.
+    const role = typeof getCurrentRole === 'function' ? getCurrentRole() : null;
+    if (role === 'caregiver' && page !== 'training-hub' && page !== 'settings') {
+        // Fire-and-forget — if gate fires it will call loadPage('training-hub')
+        // after the current page loads, avoiding a blocking race.
+        setTimeout(() => _runTrainingGate(), 0);
     }
     
     // Update sidebar active state
@@ -7731,9 +7788,11 @@ async function _renderEmergencyTab(c, isAdmin) {
 function openAddTrainingModuleModal() {
     modalTitle.textContent = 'Add Training Module';
     modalBody.innerHTML = _trainingModuleForm();
+    modalBody.style.maxHeight = '70vh';
+    modalBody.style.overflowY = 'auto';
     modalFooter.innerHTML = `
         <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveTrainingModuleModal(null)"><i class="ph ph-floppy-disk"></i> Save</button>`;
+        <button class="btn btn-primary" onclick="saveTrainingModuleModal(null)"><i class="ph ph-floppy-disk"></i> Save Module</button>`;
     openModal();
 }
 
@@ -7743,46 +7802,330 @@ async function openEditTrainingModuleModal(id) {
     if (!m) return;
     modalTitle.textContent = 'Edit Training Module';
     modalBody.innerHTML = _trainingModuleForm(m);
+    modalBody.style.maxHeight = '70vh';
+    modalBody.style.overflowY = 'auto';
     modalFooter.innerHTML = `
         <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveTrainingModuleModal('${id}')"><i class="ph ph-floppy-disk"></i> Save</button>`;
+        <button class="btn btn-primary" onclick="saveTrainingModuleModal('${id}')"><i class="ph ph-floppy-disk"></i> Save Module</button>`;
     openModal();
 }
 
 function _trainingModuleForm(m = {}) {
+    const cats = ['onboarding','safety','clinical','compliance','soft_skills','policy','general'];
+    const types = ['document','video','link','quiz','photo_guide','mixed'];
     return `
-        <div class="form-group"><label>Title *</label><input type="text" class="form-control" id="tm-title" value="${escapeHtml(m.title||'')}" placeholder="Module title"></div>
-        <div class="form-group"><label>Description</label><textarea class="form-control" id="tm-desc" rows="2">${escapeHtml(m.description||'')}</textarea></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--spacing-sm);">
-            <div class="form-group"><label>Category</label>
-                <select class="form-select" id="tm-category">
-                    ${['onboarding','safety','clinical','compliance','soft_skills','policy','general'].map(c => `<option value="${c}" ${m.category===c?'selected':''}>${c.replace('_',' ')}</option>`).join('')}
-                </select></div>
-            <div class="form-group"><label>Content Type</label>
-                <select class="form-select" id="tm-type">
-                    ${['document','video','link','quiz','photo_guide'].map(t => `<option value="${t}" ${m.content_type===t?'selected':''}>${t.replace('_',' ')}</option>`).join('')}
-                </select></div>
-        </div>
-        <div class="form-group"><label>Content URL</label><input type="url" class="form-control" id="tm-url" value="${escapeHtml(m.content_url||'')}" placeholder="https://…"></div>
-        <div class="form-group"><label>Content Body</label><textarea class="form-control" id="tm-body" rows="3" placeholder="Text instructions / guide…">${escapeHtml(m.content_body||'')}</textarea></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--spacing-sm);">
-            <div class="form-group"><label>Duration (min)</label><input type="number" class="form-control" id="tm-duration" value="${m.duration_minutes||''}" min="1"></div>
-            <div class="form-group" style="padding-top:24px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="tm-required" style="width:auto;" ${m.is_required?'checked':''}> Required</label></div>
-            <div class="form-group" style="padding-top:24px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="tm-ack" style="width:auto;" ${m.requires_acknowledgement?'checked':''}> Needs Ack</label></div>
+        <div style="display:flex;flex-direction:column;gap:16px;">
+
+            <!-- Template Picker -->
+            <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:12px 14px;">
+                <div style="font-size:12px;font-weight:600;color:#92400e;margin-bottom:6px;"><i class="ph ph-lightning"></i> Quick Fill from Template</div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <select id="tm-template" class="form-select" style="flex:1;min-width:200px;">
+                        <option value="">Choose a template…</option>
+                        <option value="level1">Level 1 Orientation</option>
+                        <option value="carehub">CareHub Walkthrough</option>
+                        <option value="confidentiality">Confidentiality &amp; Boundaries</option>
+                        <option value="emergency">Emergency Reporting</option>
+                    </select>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="applyTrainingTemplate()">
+                        <i class="ph ph-magic-wand"></i> Use Template
+                    </button>
+                </div>
+            </div>
+
+            <!-- Title -->
+            <div class="form-group" style="margin:0;">
+                <label style="font-weight:600;">Title <span style="color:#dc2626;">*</span></label>
+                <input type="text" class="form-control" id="tm-title" value="${escapeHtml(m.title||'')}" placeholder="Module title" style="width:100%;">
+            </div>
+
+            <!-- Description -->
+            <div class="form-group" style="margin:0;">
+                <label style="font-weight:600;">Description</label>
+                <textarea class="form-control" id="tm-desc" rows="3" placeholder="Brief summary of this module…" style="width:100%;resize:vertical;">${escapeHtml(m.description||'')}</textarea>
+            </div>
+
+            <!-- Category + Type -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div class="form-group" style="margin:0;">
+                    <label style="font-weight:600;">Category</label>
+                    <select class="form-select" id="tm-category" style="width:100%;">
+                        ${cats.map(c => `<option value="${c}" ${(m.category||'onboarding')===c?'selected':''}>${c.replace(/_/g,' ').replace(/\b\w/g,l=>l.toUpperCase())}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group" style="margin:0;">
+                    <label style="font-weight:600;">Content Type</label>
+                    <select class="form-select" id="tm-type" style="width:100%;">
+                        ${types.map(t => `<option value="${t}" ${(m.content_type||'document')===t?'selected':''}>${t.replace(/_/g,' ').replace(/\b\w/g,l=>l.toUpperCase())}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+
+            <!-- Duration + Required + Ack -->
+            <div style="display:grid;grid-template-columns:140px 1fr 1fr;gap:12px;align-items:end;">
+                <div class="form-group" style="margin:0;">
+                    <label style="font-weight:600;">Duration (min)</label>
+                    <input type="number" class="form-control" id="tm-duration" value="${m.duration_minutes||''}" min="1" placeholder="e.g. 15" style="width:100%;">
+                </div>
+                <div style="padding-bottom:4px;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:500;padding:8px 12px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;">
+                        <input type="checkbox" id="tm-required" style="width:16px;height:16px;accent-color:#b45309;" ${m.is_required?'checked':''}>
+                        <span>Required module</span>
+                    </label>
+                </div>
+                <div style="padding-bottom:4px;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:500;padding:8px 12px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;">
+                        <input type="checkbox" id="tm-ack" style="width:16px;height:16px;accent-color:#b45309;" ${m.requires_acknowledgement?'checked':''}>
+                        <span>Requires acknowledgement</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Content Body -->
+            <div class="form-group" style="margin:0;">
+                <label style="font-weight:600;">Content Body</label>
+                <textarea class="form-control" id="tm-body" rows="10" placeholder="Full module text, instructions, or guide content…" style="width:100%;resize:vertical;font-size:13px;line-height:1.6;">${escapeHtml(m.content_body||'')}</textarea>
+            </div>
+
+            <!-- Media Section -->
+            <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:14px;">
+                <div style="font-size:12px;font-weight:700;color:#374151;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px;"><i class="ph ph-video"></i> Media</div>
+                <div class="form-group" style="margin:0 0 10px 0;">
+                    <label style="font-weight:600;">Video URL</label>
+                    <input type="url" class="form-control" id="tm-url" value="${escapeHtml(m.content_url||'')}" placeholder="https://youtube.com/… or vimeo.com/…" style="width:100%;">
+                    <div style="font-size:11px;color:#6b7280;margin-top:4px;">Optional: paste a YouTube, Vimeo, Google Drive, or uploaded video link.</div>
+                </div>
+                <div class="form-group" style="margin:0 0 10px 0;">
+                    <label style="font-weight:600;">Image URL</label>
+                    <input type="url" class="form-control" id="tm-image" value="${escapeHtml(m.image_url||'')}" placeholder="https://… (cover image or diagram)" style="width:100%;">
+                </div>
+                <div style="border:2px dashed #d1d5db;border-radius:8px;padding:20px;text-align:center;color:#9ca3af;">
+                    <i class="ph ph-upload-simple" style="font-size:24px;display:block;margin-bottom:6px;"></i>
+                    <div style="font-size:13px;">File upload coming soon</div>
+                    <div style="font-size:11px;margin-top:2px;">PDFs, images, and documents will be uploadable here.</div>
+                </div>
+            </div>
+
         </div>`;
+}
+
+// Training module templates
+const TRAINING_TEMPLATES = {
+    level1: {
+        title: 'Level 1 Orientation: Welcome to SeniorSitters',
+        description: "A required onboarding module for new caregivers covering SeniorSitters' mission, non-medical scope of care, professional expectations, CareHub basics, visit workflow, confidentiality, and emergency reporting.",
+        category: 'onboarding',
+        content_type: 'mixed',
+        content_url: '',
+        duration_minutes: 15,
+        is_required: true,
+        requires_acknowledgement: true,
+        content_body: `Welcome to SeniorSitters
+
+SeniorSitters is a family-owned, non-medical companion care company serving seniors and families throughout Northeast Ohio. Our mission is to help older adults remain connected, independent, active, and supported while giving families peace of mind.
+
+What We Do:
+- Friendly companionship and conversation
+- Games, puzzles, reading, and hobbies
+- Appointment companionship
+- Grocery shopping and errands
+- Community outings
+- Meal reminders and light meal assistance
+- Light household support
+- Wellness check-ins
+- Family updates
+- Respite support for family caregivers
+
+What We Do NOT Do:
+- No medical care
+- No medication administration
+- No injections
+- No wound care
+- No diagnosis
+- No nursing services
+- No emergency medical services
+- No heavy lifting outside company policy
+- No accepting money, loans, or personal gifts from clients
+
+Professional Expectations:
+- Arrive on time
+- Dress professionally
+- Speak respectfully
+- Follow the client care plan
+- Maintain confidentiality
+- Report concerns promptly
+- Complete visit documentation
+- Communicate schedule issues early
+
+CareHub Overview:
+CareHub is where caregivers review schedules, client notes, timesheets, mileage, visit updates, messages, announcements, profile information, and availability.
+
+Before Every Visit:
+- Check your schedule
+- Review client notes
+- Confirm location and time
+- Prepare for outing support if applicable
+
+During Every Visit:
+- Provide companionship
+- Follow client preferences and care plan
+- Stay within non-medical scope
+- Observe and report concerns
+
+After Every Visit:
+- Submit visit update
+- Submit timesheet
+- Submit approved mileage
+- Report urgent concerns immediately
+
+Confidentiality and Boundaries:
+Client information is private. Do not share client addresses, phone numbers, health details, family matters, photos, or personal information. Do not post about clients online. Do not accept private side payments. Do not give personal medical, legal, or financial advice.
+
+Emergency Reporting:
+For medical emergencies, call 911 first. Then notify SeniorSitters management. Report falls, confusion, unsafe home conditions, missed visits, client distress, family concerns, or suspected abuse/neglect immediately.
+
+Completion:
+Caregivers must complete this module and pass the quiz with at least 80% before being assigned to clients or scheduled for visits.`
+    },
+    carehub: {
+        title: 'CareHub Walkthrough',
+        description: 'An overview of every section of the CareHub portal — how to check your schedule, submit timesheets, log mileage, submit visit updates, and manage your profile.',
+        category: 'policy',
+        content_type: 'document',
+        content_url: '',
+        duration_minutes: 10,
+        is_required: true,
+        requires_acknowledgement: false,
+        content_body: `CareHub Walkthrough
+
+Dashboard:
+Your home screen. Shows today's schedule, recent activity, alerts, and quick-action buttons.
+
+Schedule:
+View all upcoming visits. Check client name, address, time, and any special notes before each visit.
+
+Timesheets:
+Submit hours after each visit. Enter start time, end time, and any notes. Submit before the weekly deadline.
+
+Mileage:
+Log mileage for approved client-related travel. Enter date, trip purpose, miles driven, and any notes.
+
+Visit Updates:
+After each visit, submit a brief update. Note how the client was doing, any concerns, and tasks completed.
+
+Clients:
+Review care plan notes and preferences for the clients you serve.
+
+Profile & Availability:
+Keep your contact info, availability, and certifications up to date.`
+    },
+    confidentiality: {
+        title: 'Confidentiality & Boundaries',
+        description: 'Covers SeniorSitters confidentiality policy, professional boundaries, and HIPAA-aligned privacy expectations for all caregivers.',
+        category: 'compliance',
+        content_type: 'document',
+        content_url: '',
+        duration_minutes: 10,
+        is_required: true,
+        requires_acknowledgement: true,
+        content_body: `Confidentiality & Boundaries
+
+All client information is private and confidential.
+
+What You Must NOT Do:
+- Share client names, addresses, or phone numbers with anyone outside SeniorSitters
+- Discuss client health conditions, diagnoses, or personal situations
+- Share family matters, personal details, or financial information
+- Post photos or information about clients on social media or any public platform
+- Record clients without their explicit consent
+- Accept private payments, gifts, loans, or tips from clients or families
+- Give personal medical, legal, financial, or nutritional advice
+- Form private personal or financial relationships with clients outside of work
+
+Digital & Social Media:
+Do not post about clients, visits, or work situations online — even without names. This includes photos from visits, comments about client behavior, and complaints about assignments.
+
+Consequences:
+Violation of confidentiality is grounds for immediate termination and may result in legal action.
+
+Questions:
+Contact SeniorSitters management before taking any action you are unsure about.`
+    },
+    emergency: {
+        title: 'Emergency & Concern Reporting',
+        description: 'Step-by-step guidance on how to respond to medical emergencies, safety concerns, suspected abuse/neglect, and other urgent situations during a visit.',
+        category: 'safety',
+        content_type: 'document',
+        content_url: '',
+        duration_minutes: 10,
+        is_required: true,
+        requires_acknowledgement: true,
+        content_body: `Emergency & Concern Reporting
+
+Step 1 — Medical Emergency:
+Call 911 immediately. Do not wait. Stay calm and stay with the client until emergency services arrive.
+
+Step 2 — Notify SeniorSitters:
+After calling 911, call or text your SeniorSitters supervisor or the after-hours emergency number immediately.
+
+Step 3 — Document:
+After the situation is resolved, submit a detailed incident report in CareHub as soon as possible.
+
+What to Report:
+- Falls, injuries, or accidents
+- Sudden changes in health or mental status
+- Signs of confusion, disorientation, or distress
+- Unsafe home conditions (no heat, no food, gas smell, fire risk)
+- Missed or abandoned visits
+- Suspected abuse, neglect, or exploitation by anyone
+- Family conflict or concerning family behavior
+- Client refusing care or asking you to leave
+- Any situation where you feel unsafe
+
+Who to Call:
+- Emergency: 911
+- SeniorSitters Management: see the Contacts section in the Resource Center
+- After-hours: see the Emergency Contacts section in Training Hub
+
+Remember:
+You are never expected to handle emergencies alone. When in doubt, call 911 and then call us.`
+    }
+};
+
+function applyTrainingTemplate() {
+    const key = document.getElementById('tm-template')?.value;
+    if (!key || !TRAINING_TEMPLATES[key]) {
+        if (typeof CareHubToast !== 'undefined') CareHubToast.warning('Select a template first.');
+        return;
+    }
+    const t = TRAINING_TEMPLATES[key];
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val ?? ''; };
+    const check = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+    set('tm-title',    t.title);
+    set('tm-desc',     t.description);
+    set('tm-category', t.category);
+    set('tm-type',     t.content_type);
+    set('tm-url',      t.content_url || '');
+    set('tm-duration', t.duration_minutes || '');
+    set('tm-body',     t.content_body);
+    check('tm-required', t.is_required);
+    check('tm-ack',      t.requires_acknowledgement);
+    if (typeof CareHubToast !== 'undefined') CareHubToast.success(`Template "${t.title}" applied.`);
 }
 
 async function saveTrainingModuleModal(id) {
     const title = document.getElementById('tm-title')?.value?.trim();
     if (!title) { CareHubToast.warning('Title is required.'); return; }
     const mod = {
-        title, description: document.getElementById('tm-desc')?.value?.trim()||null,
-        category: document.getElementById('tm-category')?.value,
-        content_type: document.getElementById('tm-type')?.value,
-        content_url: document.getElementById('tm-url')?.value?.trim()||null,
-        content_body: document.getElementById('tm-body')?.value?.trim()||null,
-        duration_minutes: parseInt(document.getElementById('tm-duration')?.value)||null,
-        is_required: document.getElementById('tm-required')?.checked||false,
+        title,
+        description:              document.getElementById('tm-desc')?.value?.trim()||null,
+        category:                 document.getElementById('tm-category')?.value,
+        content_type:             document.getElementById('tm-type')?.value,
+        content_url:              document.getElementById('tm-url')?.value?.trim()||null,
+        image_url:                document.getElementById('tm-image')?.value?.trim()||null,
+        content_body:             document.getElementById('tm-body')?.value?.trim()||null,
+        duration_minutes:         parseInt(document.getElementById('tm-duration')?.value)||null,
+        is_required:              document.getElementById('tm-required')?.checked||false,
         requires_acknowledgement: document.getElementById('tm-ack')?.checked||false,
         is_active: true
     };
@@ -8213,6 +8556,7 @@ window.openAddResourceModal = openAddResourceModal;
 window.openEditResourceModal = openEditResourceModal;
 window.saveResourceModal = saveResourceModal;
 window.deleteResourceUI = deleteResourceUI;
+window.applyTrainingTemplate = applyTrainingTemplate;
 window.renderNotifications = renderNotifications;
 window._applyNotifFilter = _applyNotifFilter;
 window._loadNotificationsContent = _loadNotificationsContent;

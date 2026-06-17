@@ -1191,27 +1191,35 @@ async function getProfileByCaregiverId(caregiverId) {
  * @returns {Promise<boolean>}
  */
 async function isCaregiverTrainingComplete(caregiverId) {
-    if (!supabaseClient) return false;
+    // Fail-open: if the client isn't ready or any lookup fails, return true
+    // (do NOT block the caregiver) rather than trapping them on training forever.
+    if (!supabaseClient) {
+        console.warn('[CareHub] isCaregiverTrainingComplete: no supabase client — fail-open');
+        return true;
+    }
     try {
         const profile = await getProfileByCaregiverId(caregiverId);
-        if (!profile || !profile.id) return false;
+        if (!profile || !profile.id) {
+            // No profiles row yet (invite not accepted, RLS block, etc.) — fail-open
+            console.warn('[CareHub] isCaregiverTrainingComplete: no profile for caregiverId', caregiverId, '— fail-open');
+            return true;
+        }
         const { data, error } = await supabaseClient
             .from('training_progress')
-            .select('*')
+            .select('status, score, completed_at')
             .eq('user_id', profile.id)
             .eq('module_id', 'level_1_orientation')
             .limit(1)
             .maybeSingle();
         if (error) {
-            console.error('[CareHub] isCaregiverTrainingComplete error:', error.message);
-            return false;
+            console.error('[CareHub] isCaregiverTrainingComplete error:', error.message, '— fail-open');
+            return true; // RLS error or missing table — fail-open
         }
-        const row = data;
-        if (!row) return false;
-        return row.status === 'passed' && row.score >= 80 && row.completed_at !== null;
+        if (!data) return false; // Row exists for profile but no training record — not started
+        return data.status === 'passed' && data.score >= 80 && data.completed_at !== null;
     } catch (e) {
-        console.error('[CareHub] isCaregiverTrainingComplete exception:', e);
-        return false;
+        console.error('[CareHub] isCaregiverTrainingComplete exception:', e, '— fail-open');
+        return true;
     }
 }
 
