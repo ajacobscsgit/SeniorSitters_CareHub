@@ -1537,7 +1537,8 @@ async function renderApplications() {
         <div class="filter-tabs">
             <button class="filter-tab active" data-filter="all">All</button>
             <button class="filter-tab" data-filter="new">New</button>
-            <button class="filter-tab" data-filter="pending">Pending</button>
+            <button class="filter-tab" data-filter="reviewing">Reviewing</button>
+            <button class="filter-tab" data-filter="interview">Interview</button>
             <button class="filter-tab" data-filter="approved">Approved</button>
             <button class="filter-tab" data-filter="denied">Denied</button>
         </div>
@@ -1640,11 +1641,11 @@ async function renderCareRequests() {
         <div class="filter-tabs">
             <button class="filter-tab active" data-filter="all">All</button>
             <button class="filter-tab" data-filter="new">New</button>
-            <button class="filter-tab" data-filter="reviewing">Reviewing</button>
-            <button class="filter-tab" data-filter="onboarding">Onboarding</button>
-            <button class="filter-tab" data-filter="approved">Approved</button>
-            <button class="filter-tab" data-filter="denied">Denied</button>
-            <button class="filter-tab" data-filter="converted_to_client">Converted</button>
+            <button class="filter-tab" data-filter="contacted">Contacted</button>
+            <button class="filter-tab" data-filter="scheduled">Scheduled</button>
+            <button class="filter-tab" data-filter="converted">Converted</button>
+            <button class="filter-tab" data-filter="converted_to_client">Converted (Legacy)</button>
+            <button class="filter-tab" data-filter="declined">Declined</button>
         </div>
         
         <div class="card">
@@ -3031,25 +3032,55 @@ async function viewApplication(id) {
         CareHubToast.error('Application not found');
         return;
     }
-    
+
     currentData = application;
-    
+
     modalTitle.textContent = 'Application Details';
     modalBody.innerHTML = renderApplicationDetails(application);
-    
-    // Show action buttons only for new/pending applications
-    if (application.status === 'new' || application.status === 'pending') {
-        modalFooter.innerHTML = `
-            <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+
+    // ── Build action buttons based on workflow stage ──────────────────────────
+    // Workflow: new → reviewing → interview → approved (→ Approve & Create Caregiver) | denied
+    let actionButtons = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+
+    if (application.status === 'new') {
+        actionButtons += `
             <button class="btn btn-danger" onclick="denyApplication('${id}')">Deny</button>
-            <button class="btn btn-success" onclick="approveApplication('${id}')">Approve</button>
+            <button class="btn btn-warning" onclick="updateApplicationStatusUI('${id}', 'reviewing')">
+                <i class="ph ph-eye"></i> Start Review
+            </button>
         `;
-    } else {
-        modalFooter.innerHTML = `
-            <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+    } else if (application.status === 'reviewing') {
+        actionButtons += `
+            <button class="btn btn-danger" onclick="denyApplication('${id}')">Deny</button>
+            <button class="btn btn-warning" onclick="updateApplicationStatusUI('${id}', 'interview')">
+                <i class="ph ph-chat-circle"></i> Schedule Interview
+            </button>
+        `;
+    } else if (application.status === 'interview') {
+        actionButtons += `
+            <button class="btn btn-danger" onclick="denyApplication('${id}')">Deny</button>
+            <button class="btn btn-success" onclick="approveApplication('${id}')">
+                <i class="ph ph-user-check"></i> Approve &amp; Create Caregiver
+            </button>
+        `;
+    } else if (application.status === 'pending') {
+        // Legacy pending — treat same as new
+        actionButtons += `
+            <button class="btn btn-danger" onclick="denyApplication('${id}')">Deny</button>
+            <button class="btn btn-success" onclick="approveApplication('${id}')">
+                <i class="ph ph-user-check"></i> Approve &amp; Create Caregiver
+            </button>
+        `;
+    } else if (application.status === 'approved') {
+        actionButtons += `
+            <button class="btn btn-secondary" style="cursor:default;opacity:0.7;" disabled>
+                <i class="ph ph-check-circle"></i> Approved
+            </button>
         `;
     }
-    
+    // denied — only the Close button remains
+
+    modalFooter.innerHTML = actionButtons;
     openModal();
 }
 
@@ -3065,36 +3096,52 @@ async function viewCareRequest(id) {
     modalTitle.textContent = 'Care Request Details';
     modalBody.innerHTML = renderCareRequestDetails(request);
 
-    // Build action buttons based on workflow status
-    // Workflow: new → reviewing → onboarding → approved → converted_to_client
+    // ── Build action buttons based on workflow stage ──────────────────────────
+    // Workflow: new → contacted → scheduled → converted | declined
     let actionButtons = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
 
     if (request.status === 'new') {
         actionButtons += `
             <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
-            <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Deny</button>
-            <button class="btn btn-warning" onclick="updateCareRequestStatusUI('${id}', 'reviewing')">Start Review</button>
+            <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Decline</button>
+            <button class="btn btn-warning" onclick="updateCareRequestStatusUI('${id}', 'contacted')">
+                <i class="ph ph-phone"></i> Mark Contacted
+            </button>
         `;
-    } else if (request.status === 'reviewing') {
+    } else if (request.status === 'contacted') {
         actionButtons += `
             <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
-            <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Deny</button>
-            <button class="btn btn-success" onclick="updateCareRequestStatusUI('${id}', 'onboarding')">Approve for Onboarding</button>
+            <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Decline</button>
+            <button class="btn btn-warning" onclick="updateCareRequestStatusUI('${id}', 'scheduled')">
+                <i class="ph ph-calendar-check"></i> Mark Scheduled
+            </button>
+            <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">
+                <i class="ph ph-user-plus"></i> Convert to Client
+            </button>
         `;
-    } else if (request.status === 'onboarding') {
+    } else if (request.status === 'scheduled') {
         actionButtons += `
             <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
-            <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">Convert to Client</button>
-            <button class="btn btn-success" onclick="updateCareRequestStatusUI('${id}', 'approved')">Complete Onboarding</button>
+            <button class="btn btn-danger" onclick="denyCareRequest('${id}')">Decline</button>
+            <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">
+                <i class="ph ph-user-plus"></i> Convert to Client
+            </button>
         `;
-    } else if (request.status === 'approved') {
+    } else if (request.status === 'converted' || request.status === 'converted_to_client') {
+        actionButtons += `
+            <button class="btn btn-secondary" style="cursor:default;opacity:0.7;" disabled>
+                <i class="ph ph-check-circle"></i> Converted to Client
+            </button>
+        `;
+    } else if (request.status === 'declined' || request.status === 'denied') {
+        // Only Close button remains
+    } else {
+        // Legacy statuses (reviewing, onboarding, approved) — still allow Convert to Client
         actionButtons += `
             <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
-            <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">Convert to Client</button>
-        `;
-    } else if (request.status !== 'converted_to_client') {
-        actionButtons += `
-            <button class="btn btn-secondary" onclick="addCareRequestAdminNotes('${id}')">Add Notes</button>
+            <button class="btn btn-success" onclick="convertCareRequestToClient('${id}')">
+                <i class="ph ph-user-plus"></i> Convert to Client
+            </button>
         `;
     }
 
@@ -3269,6 +3316,13 @@ async function approveApplication(id) {
     const caregiver = await createCaregiverFromApplication(currentData);
     if (!caregiver) {
         CareHubToast.error('Application approved but caregiver profile could not be created. Check the console for details.');
+        closeModal();
+        loadPage('applications');
+        return;
+    }
+    if (caregiver._duplicate) {
+        console.warn('[ADMIN WARNING] Duplicate caregiver detected during approval — profile already exists:', caregiver.existing);
+        CareHubToast.warning(`A caregiver profile already exists for this email/phone (${caregiver.existing?.name || caregiver.existing?.email || 'unknown'}). Application approved but no new profile was created.`);
         closeModal();
         loadPage('applications');
         return;
@@ -3491,7 +3545,7 @@ async function denyApplication(id) {
         iconColor: '#EF4444'
     });
     if (notes === null) return; // User cancelled
-    
+
     const success = await updateApplicationStatus(id, 'denied', notes);
     if (success) {
         CareHubToast.success('Application has been denied.');
@@ -3502,28 +3556,36 @@ async function denyApplication(id) {
     }
 }
 
+async function updateApplicationStatusUI(id, status) {
+    const success = await updateApplicationStatus(id, status);
+    if (success) {
+        const labels = { reviewing: 'moved to Reviewing', interview: 'scheduled for Interview' };
+        CareHubToast.success(`Application ${labels[status] || ('marked as ' + status)}.`);
+        closeModal();
+        loadPage('applications');
+    } else {
+        CareHubToast.error('Failed to update application status.');
+    }
+}
+
 async function denyCareRequest(id) {
     const notes = await CareHubConfirm.prompt({
-        title: 'Deny Care Request',
-        message: 'Add a denial reason:',
-        placeholder: 'Enter reason for denial...',
-        required: true,
+        title: 'Decline Care Request',
+        message: 'Optional: Add a reason for declining:',
+        placeholder: 'Enter reason for declining...',
+        required: false,
         icon: 'ph-warning',
         iconColor: '#F59E0B'
     });
     if (notes === null) return;
-    if (!notes.trim()) {
-        CareHubToast.error('Denial reason is required.');
-        return;
-    }
 
-    const success = await updateCareRequestStatus(id, 'denied', notes);
+    const success = await updateCareRequestStatus(id, 'declined', notes);
     if (success) {
-        CareHubToast.success('Care request has been denied.');
+        CareHubToast.success('Care request has been declined.');
         closeModal();
         loadPage('care-requests');
     } else {
-        CareHubToast.error('Failed to deny care request');
+        CareHubToast.error('Failed to decline care request');
     }
 }
 
@@ -3571,41 +3633,76 @@ async function convertCareRequestToClient(id) {
         return;
     }
 
-    if (currentData.status !== 'approved' && currentData.status !== 'onboarding') {
-        CareHubToast.warning('Only approved or onboarding care requests can be converted to clients.');
+    const eligible = ['new', 'contacted', 'scheduled', 'approved', 'onboarding'];
+    if (!eligible.includes(currentData.status)) {
+        CareHubToast.warning('This care request cannot be converted in its current status.');
         return;
     }
 
+    // ── Step 1: Confirm client profile creation ───────────────────────────────
     const confirmed = await CareHubConfirm.confirm({
-        title: 'Convert to Client',
-        message: 'Are you sure you want to convert this care request to a client?',
-        confirmText: 'Convert',
-        icon: 'ph-arrow-circle-right'
+        title:       'Convert to Client',
+        message:     `Create a client profile for ${currentData.requester_name || 'this requester'} and their loved one (${currentData.care_for || 'unknown'})?`,
+        confirmText: 'Convert to Client',
+        cancelText:  'Cancel',
+        icon:        'ph-user-plus',
+        iconColor:   '#10B981'
     });
     if (!confirmed) return;
 
     const client = await createClientFromCareRequest(currentData);
-    if (client) {
-        CareHubToast.success(`Client "${client.name || client.care_for || client.requester_name || 'New client'}" has been created.`);
 
-        // Invite family member to create their CareHub account
-        const familyEmail = currentData.email || currentData.requester_email || null;
-        if (window.SupabaseAuth && familyEmail) {
+    if (!client) {
+        CareHubToast.error('Failed to create client profile. Check console for details.');
+        return;
+    }
+
+    if (client._duplicate) {
+        console.warn('[ADMIN WARNING] Duplicate client detected during conversion — profile already exists:', client.existing);
+        CareHubToast.warning(`A client profile already exists for this email/phone (${client.existing?.name || client.existing?.email || 'unknown'}). No new profile was created.`);
+        closeModal();
+        loadPage('care-requests');
+        return;
+    }
+
+    CareHubToast.success(`Client profile created for ${client.name || client.care_for || client.requester_name || 'new client'}.`);
+
+    // Mark care request as converted
+    await updateCareRequestStatus(id, 'converted');
+
+    // ── Step 2: Ask whether to send the portal invite now ────────────────────
+    const familyEmail = currentData.email || null;
+    if (familyEmail) {
+        const sendNow = await CareHubConfirm.confirm({
+            title:       'Send Portal Invite?',
+            message:     `Client profile created for ${client.name || client.care_for || 'new client'}.\n\nSend a portal invite to ${familyEmail} so the family can access CareHub?`,
+            confirmText: 'Send Invite Now',
+            cancelText:  'Save for Later',
+            icon:        'ph-envelope',
+            iconColor:   '#6366F1'
+        });
+
+        if (sendNow && window.SupabaseAuth) {
             const invite = await window.SupabaseAuth.inviteUser({
                 email:     familyEmail,
                 role:      'client_family',
                 full_name: currentData.requester_name || familyEmail,
                 client_id: client.id
             });
-            if (invite.pending) {
-                CareHubToast.warning('Account invite queued — deploy the invite-user Edge Function to send the email.');
-            } else if (invite.success) {
-                CareHubToast.info(`Invite email sent to ${familyEmail}.`);
+            if (invite.success) {
+                CareHubToast.success(`Portal invite sent to ${familyEmail}.`);
+            } else if (invite.pending) {
+                CareHubToast.warning(`Invite queued for ${familyEmail} — email will send once the Edge Function is deployed.`);
+            } else if (invite.code === 'EMAIL_EXISTS') {
+                CareHubToast.info(`${familyEmail} already has a CareHub account.`);
+            } else {
+                CareHubToast.error(`Invite failed: ${invite.error || 'Unknown error.'}`);
             }
+        } else if (sendNow && !window.SupabaseAuth) {
+            CareHubToast.warning('Auth system not available — invite could not be sent.');
+        } else {
+            CareHubToast.info('Invite skipped. You can send it later from the client profile.');
         }
-    } else {
-        CareHubToast.error('Failed to create client profile. Check console for errors.');
-        return;
     }
 
     closeModal();
@@ -8561,6 +8658,7 @@ window.renderNotifications = renderNotifications;
 window._applyNotifFilter = _applyNotifFilter;
 window._loadNotificationsContent = _loadNotificationsContent;
 window.denyApplication = denyApplication;
+window.updateApplicationStatusUI = updateApplicationStatusUI;
 window.denyCareRequest = denyCareRequest;
 window.addCareRequestAdminNotes = addCareRequestAdminNotes;
 window.updateCareRequestStatusUI = updateCareRequestStatusUI;

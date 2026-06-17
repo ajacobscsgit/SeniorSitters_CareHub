@@ -17,7 +17,15 @@ window.CAREHUB_CONFIG = {
   // Set to true ONLY after supabase/functions/invite-user has been deployed.
   // false = inviteUser() queues a pending_invite profile row but sends NO email.
   // true  = inviteUser() calls the Edge Function, creates a real auth account, and sends the invite email.
-  EDGE_FUNCTION_DEPLOYED: false
+  EDGE_FUNCTION_DEPLOYED: false,
+
+  // EmailJS configuration for backup email on public form submissions.
+  // Sign up at https://www.emailjs.com and fill these in to enable backup emails.
+  // Leave as empty strings to disable (forms will still save to Supabase).
+  EMAILJS_PUBLIC_KEY:        '',   // Your EmailJS public key
+  EMAILJS_SERVICE_ID:        '',   // Your EmailJS service ID
+  EMAILJS_CAREERS_TEMPLATE:  '',   // Template ID for caregiver application emails
+  EMAILJS_CARE_TEMPLATE:     ''    // Template ID for care request emails
 };
 
 window.TABLES = {
@@ -164,48 +172,44 @@ window.DASHBOARD_VISIBILITY = {
 
 // Status Configurations for UI
 window.STATUS_CONFIG = {
-  // Application statuses
-  pending: { label: 'Pending', class: 'status-pending', icon: '⏳' },
-  approved: { label: 'Approved', class: 'status-approved', icon: '✓' },
-  denied: { label: 'Denied', class: 'status-denied', icon: '✕' },
+  // ── Application statuses (caregiver intake) ──────────────────────────────
+  new:        { label: 'New',        class: 'status-new',        icon: '★'  },
+  reviewing:  { label: 'Reviewing',  class: 'status-reviewing',  icon: '👁️' },
+  interview:  { label: 'Interview',  class: 'status-interview',  icon: '💬' },
+  approved:   { label: 'Approved',   class: 'status-approved',   icon: '✓'  },
+  denied:     { label: 'Denied',     class: 'status-denied',     icon: '✕'  },
+  pending:    { label: 'Pending',    class: 'status-pending',    icon: '⏳' },
 
-  // Caregiver employment statuses
+  // ── Care request statuses (client intake) ────────────────────────────────
+  contacted:          { label: 'Contacted',   class: 'status-contacted',   icon: '📞' },
+  scheduled:          { label: 'Scheduled',   class: 'status-scheduled',   icon: '📅' },
+  converted:          { label: 'Converted',   class: 'status-converted',   icon: '✅' },
+  converted_to_client:{ label: 'Converted',   class: 'status-converted',   icon: '✅' },
+  declined:           { label: 'Declined',    class: 'status-denied',      icon: '✕'  },
+
+  // ── Caregiver employment statuses ────────────────────────────────────────
   onboarding: { label: 'Onboarding', class: 'status-onboarding', icon: '📋' },
-  active: { label: 'Active', class: 'status-active', icon: '●' },
-  inactive: { label: 'Inactive', class: 'status-inactive', icon: '○' },
+  active:     { label: 'Active',     class: 'status-active',     icon: '●'  },
+  inactive:   { label: 'Inactive',   class: 'status-inactive',   icon: '○'  },
 
-  // Caregiver portal account_status
-  approved_no_invite: { label: 'No Invite Sent',   class: 'status-pending',    icon: '○' },
-  pending_invite:     { label: 'Invite Queued',     class: 'status-reviewing',  icon: '⏳' },
-  invite_sent:        { label: 'Invite Sent',       class: 'status-onboarding', icon: '✉' },
+  // ── Caregiver portal account_status ──────────────────────────────────────
+  approved_no_invite: { label: 'No Invite Sent', class: 'status-pending',    icon: '○'  },
+  pending_invite:     { label: 'Invite Queued',  class: 'status-reviewing',  icon: '⏳' },
+  invite_sent:        { label: 'Invite Sent',    class: 'status-onboarding', icon: '✉'  },
 
-  // Client statuses
-  // active and inactive reused from above
+  // ── Visit / schedule statuses ─────────────────────────────────────────────
+  in_progress:  { label: 'In Progress',  class: 'status-in-progress', icon: '🔄' },
+  completed:    { label: 'Completed',    class: 'status-completed',   icon: '✓'  },
+  cancelled:    { label: 'Cancelled',    class: 'status-cancelled',   icon: '✕'  },
+  no_show:      { label: 'No Show',      class: 'status-no-show',     icon: '⚠️' },
 
-  // Care request statuses
-  new: { label: 'New', class: 'status-new', icon: '★' },
-  reviewing: { label: 'Reviewing', class: 'status-reviewing', icon: '👁️' },
-  onboarding: { label: 'Onboarding', class: 'status-onboarding', icon: '📋' },
-  approved: { label: 'Approved', class: 'status-approved', icon: '✓' },
-  denied: { label: 'Denied', class: 'status-denied', icon: '✕' },
-  converted_to_client: { label: 'Converted', class: 'status-converted', icon: '✅' },
+  // ── Timesheet statuses ────────────────────────────────────────────────────
+  rejected:     { label: 'Rejected',     class: 'status-rejected',    icon: '✕'  },
 
-  // Schedule statuses
-  scheduled: { label: 'Scheduled', class: 'status-scheduled', icon: '📅' },
-  in_progress: { label: 'In Progress', class: 'status-in-progress', icon: '🔄' },
-  completed: { label: 'Completed', class: 'status-completed', icon: '✓' },
-  cancelled: { label: 'Cancelled', class: 'status-cancelled', icon: '✕' },
-  no_show: { label: 'No Show', class: 'status-no-show', icon: '⚠️' },
-
-  // Timesheet statuses
-  pending: { label: 'Pending', class: 'status-pending', icon: '⏳' },
-  approved: { label: 'Approved', class: 'status-approved', icon: '✓' },
-  rejected: { label: 'Rejected', class: 'status-rejected', icon: '✕' },
-
-  // Visit update statuses
-  draft: { label: 'Draft', class: 'status-draft', icon: '📝' },
-  submitted: { label: 'Submitted', class: 'status-submitted', icon: '📤' },
-  internal_only: { label: 'Internal', class: 'status-internal', icon: '🔒' }
+  // ── Visit update statuses ─────────────────────────────────────────────────
+  draft:        { label: 'Draft',        class: 'status-draft',       icon: '📝' },
+  submitted:    { label: 'Submitted',    class: 'status-submitted',   icon: '📤' },
+  internal_only:{ label: 'Internal',     class: 'status-internal',    icon: '🔒' }
 };
 
 // Navigation Items with icons (Phosphor)

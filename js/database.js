@@ -47,6 +47,69 @@ document.addEventListener('DOMContentLoaded', function() {
 // ==================== APPLICATIONS ====================
 
 /**
+ * Create a new caregiver application (called from public careers.html form).
+ * Checks for duplicate email or phone before inserting.
+ * @param {Object} formData
+ * @returns {Promise<{success:boolean, id?:string, duplicate?:boolean, error?:string}>}
+ */
+async function createApplication(formData) {
+    if (!supabaseClient) {
+        console.error('[CareHub] createApplication: Supabase not initialized');
+        return { success: false, error: 'Supabase not configured' };
+    }
+
+    const email = (formData.email || '').toLowerCase().trim();
+    const phone = (formData.phone || '').trim();
+
+    // Duplicate check — reject if same email OR phone already on file
+    if (email || phone) {
+        let dupQuery = supabaseClient.from(TABLES.APPLICATIONS).select('id, full_name, status, created_at');
+        if (email && phone) {
+            dupQuery = dupQuery.or(`email.eq.${email},phone.eq.${phone}`);
+        } else if (email) {
+            dupQuery = dupQuery.eq('email', email);
+        } else {
+            dupQuery = dupQuery.eq('phone', phone);
+        }
+        const { data: dupData, error: dupError } = await dupQuery.order('created_at', { ascending: false }).limit(1);
+        if (!dupError && dupData && dupData.length > 0) {
+            if (window.DEBUG) console.warn('[CareHub] Duplicate application detected:', dupData[0]);
+            return { success: false, duplicate: true, existing: dupData[0] };
+        }
+    }
+
+    const application = {
+        full_name:             (formData.full_name || '').trim(),
+        phone:                 phone,
+        email:                 email,
+        city:                  (formData.city || '').trim(),
+        availability:          formData.availability || '',
+        transportation:        formData.transportation || '',
+        willing_outings:       formData.willing_outings || '',
+        experience:            formData.experience || '',
+        why_work_with_seniors: formData.why_work_with_seniors || '',
+        resume_url:            formData.resume_url || null,
+        status:                'new',
+        created_at:            new Date().toISOString(),
+        updated_at:            new Date().toISOString()
+    };
+
+    const { data, error } = await supabaseClient
+        .from(TABLES.APPLICATIONS)
+        .insert([application])
+        .select('id')
+        .single();
+
+    if (error) {
+        console.error('[CareHub] createApplication ERROR:', error);
+        return { success: false, error: error.message };
+    }
+
+    if (window.DEBUG) console.log('[CareHub] createApplication success, id:', data.id);
+    return { success: true, id: data.id };
+}
+
+/**
  * Get all applications with optional filtering
  * @param {Object} filters - Optional filters (status, etc.)
  * @returns {Promise<Array>}
@@ -445,6 +508,25 @@ async function createCaregiverFromApplication(application) {
 
     if (window.DEBUG) console.log('[CareHub] Creating caregiver from application:', application.id, application.full_name);
 
+    // Duplicate check — prevent creating a second caregiver profile with same email or phone
+    const email = (application.email || '').toLowerCase().trim();
+    const phone = (application.phone || '').trim();
+    if (email || phone) {
+        let dupQ = supabaseClient.from(TABLES.CAREGIVERS).select('id, name, email, phone');
+        if (email && phone) {
+            dupQ = dupQ.or(`email.eq.${email},phone.eq.${phone}`);
+        } else if (email) {
+            dupQ = dupQ.eq('email', email);
+        } else {
+            dupQ = dupQ.eq('phone', phone);
+        }
+        const { data: dupData, error: dupErr } = await dupQ.limit(1);
+        if (!dupErr && dupData && dupData.length > 0) {
+            console.warn('[CareHub] createCaregiverFromApplication: duplicate caregiver detected (email/phone already exists):', dupData[0]);
+            return { _duplicate: true, existing: dupData[0] };
+        }
+    }
+
     // Map actual application fields to caregiver fields
     const caregiver = {
         name: application.full_name,
@@ -671,12 +753,32 @@ async function getClientById(id) {
 async function createClientFromCareRequest(careRequest) {
     if (!supabaseClient) return null;
 
-    if (careRequest.status !== 'approved' && careRequest.status !== 'onboarding') {
-        console.error('[CareHub] Care request must be approved or onboarding before conversion:', careRequest.status);
+    if (careRequest.status !== 'approved' && careRequest.status !== 'onboarding' &&
+        careRequest.status !== 'contacted' && careRequest.status !== 'scheduled') {
+        console.error('[CareHub] Care request status not eligible for conversion:', careRequest.status);
         return null;
     }
 
     if (window.DEBUG) console.log('[CareHub] Creating client from care request:', careRequest.id, careRequest.requester_name);
+
+    // Duplicate check — prevent creating a second client profile with same email or phone
+    const email = (careRequest.email || '').toLowerCase().trim();
+    const phone = (careRequest.phone || '').trim();
+    if (email || phone) {
+        let dupQ = supabaseClient.from(TABLES.CLIENTS).select('id, name, email, phone');
+        if (email && phone) {
+            dupQ = dupQ.or(`email.eq.${email},phone.eq.${phone}`);
+        } else if (email) {
+            dupQ = dupQ.eq('email', email);
+        } else {
+            dupQ = dupQ.eq('phone', phone);
+        }
+        const { data: dupData, error: dupErr } = await dupQ.limit(1);
+        if (!dupErr && dupData && dupData.length > 0) {
+            console.warn('[CareHub] createClientFromCareRequest: duplicate client detected (email/phone already exists):', dupData[0]);
+            return { _duplicate: true, existing: dupData[0] };
+        }
+    }
 
     const client = {
         care_request_id: careRequest.id,

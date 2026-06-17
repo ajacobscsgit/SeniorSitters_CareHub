@@ -2204,6 +2204,46 @@ body {
     color: #4B5563;
 }
 
+.status-reviewing {
+    background: #FEF3C7;
+    color: #92400E;
+}
+
+.status-interview {
+    background: #E0F2FE;
+    color: #0369A1;
+}
+
+.status-contacted {
+    background: #ECFDF5;
+    color: #065F46;
+}
+
+.status-converted {
+    background: #D1FAE5;
+    color: #065F46;
+}
+
+.status-rejected {
+    background: #FEE2E2;
+    color: #991B1B;
+}
+
+.status-draft {
+    background: #F3F4F6;
+    color: #4B5563;
+}
+
+.status-submitted {
+    background: #DBEAFE;
+    color: #1E40AF;
+}
+
+.status-internal {
+    background: #F5F3FF;
+    color: #5B21B6;
+}
+
 /* Calendar View */
 .calendar-container {
     display: flex;

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Join Our Team – SeniorSitters</title>
+    <link rel="icon" href="data:,">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --brand: #d97706;
+            --brand-dark: #b45309;
+            --brand-light: #fef3c7;
+            --success: #10b981;
+            --danger: #ef4444;
+            --text: #1f2937;
+            --muted: #6b7280;
+            --border: #e5e7eb;
+            --bg: #f9fafb;
+            --white: #ffffff;
+            --radius: 12px;
+            --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+        }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+        /* Hero */
+        .hero {
+            background: linear-gradient(135deg, #92400e 0%, #d97706 50%, #f59e0b 100%);
+            color: white;
+            padding: 60px 24px 48px;
+            text-align: center;
+        }
+        .hero-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.9; }
+        .hero h1 { font-size: 2.25rem; font-weight: 800; margin-bottom: 12px; }
+        .hero p { font-size: 1.1rem; opacity: 0.9; max-width: 520px; margin: 0 auto; }
+
+        /* Form card */
+        .form-wrapper { max-width: 680px; margin: -24px auto 60px; padding: 0 16px; }
+        .form-card {
+            background: var(--white);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-lg);
+            padding: 40px;
+        }
+
+        /* Section headings */
+        .section-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--brand);
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid var(--brand-light);
+        }
+        .form-section { margin-bottom: 32px; }
+
+        /* Form fields */
+        .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .field-row.single { grid-template-columns: 1fr; }
+        @media (max-width: 540px) { .field-row { grid-template-columns: 1fr; } }
+        .field { margin-bottom: 20px; }
+        label { display: block; font-size: 0.875rem; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+        label .req { color: var(--danger); margin-left: 2px; }
+        input[type="text"], input[type="email"], input[type="tel"], select, textarea {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.9375rem;
+            color: var(--text);
+            background: var(--white);
+            transition: border-color 0.2s;
+            outline: none;
+        }
+        input:focus, select:focus, textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(217,119,6,0.1); }
+        textarea { resize: vertical; min-height: 100px; }
+
+        /* Checkbox/radio groups */
+        .check-group { display: flex; flex-wrap: wrap; gap: 10px; }
+        .check-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-size: 0.875rem;
+            user-select: none;
+        }
+        .check-option:has(input:checked) { border-color: var(--brand); background: var(--brand-light); font-weight: 600; }
+        .check-option input { width: 16px; height: 16px; accent-color: var(--brand); cursor: pointer; }
+        .radio-group { display: flex; flex-wrap: wrap; gap: 10px; }
+        .radio-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            user-select: none;
+            transition: all 0.15s;
+        }
+        .radio-option:has(input:checked) { border-color: var(--brand); background: var(--brand-light); font-weight: 600; }
+        .radio-option input { accent-color: var(--brand); cursor: pointer; }
+
+        /* Submit */
+        .btn-submit {
+            width: 100%;
+            padding: 14px;
+            background: var(--brand);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-family: inherit;
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            transition: background 0.2s, transform 0.1s;
+        }
+        .btn-submit:hover:not(:disabled) { background: var(--brand-dark); }
+        .btn-submit:active:not(:disabled) { transform: scale(0.98); }
+        .btn-submit:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        /* Status messages */
+        .msg {
+            display: none;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 16px;
+            border-radius: 10px;
+            margin-bottom: 24px;
+            font-size: 0.9rem;
+        }
+        .msg.show { display: flex; }
+        .msg-success { background: #ecfdf5; border: 1.5px solid #6ee7b7; color: #065f46; }
+        .msg-error { background: #fef2f2; border: 1.5px solid #fca5a5; color: #7f1d1d; }
+        .msg-warning { background: #fffbeb; border: 1.5px solid #fcd34d; color: #78350f; }
+        .msg i { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+
+        /* Success state */
+        .success-screen {
+            display: none;
+            text-align: center;
+            padding: 20px 0;
+        }
+        .success-screen.show { display: block; }
+        .success-screen .success-icon { font-size: 64px; color: var(--success); margin-bottom: 16px; }
+        .success-screen h2 { font-size: 1.5rem; font-weight: 800; margin-bottom: 8px; }
+        .success-screen p { color: var(--muted); margin-bottom: 24px; }
+        .success-screen a { color: var(--brand); text-decoration: none; font-weight: 600; }
+
+        /* Footer */
+        .page-footer { text-align: center; padding: 32px 16px; color: var(--muted); font-size: 0.8rem; }
+        .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.4); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+<div class="hero">
+    <div class="hero-icon"><i class="ph ph-heartbeat"></i></div>
+    <h1>Join Our Caregiving Team</h1>
+    <p>Make a difference in the lives of seniors in your community. We'd love to hear from you.</p>
+</div>
+
+<div class="form-wrapper">
+    <div class="form-card">
+
+        <!-- Status Messages -->
+        <div class="msg msg-error" id="msgError">
+            <i class="ph ph-x-circle"></i>
+            <div id="msgErrorText">Something went wrong. Please try again.</div>
+        </div>
+        <div class="msg msg-warning" id="msgWarning">
+            <i class="ph ph-warning"></i>
+            <div id="msgWarningText"></div>
+        </div>
+        <div class="msg msg-success" id="msgSuccess">
+            <i class="ph ph-check-circle"></i>
+            <div id="msgSuccessText"></div>
+        </div>
+
+        <!-- Application Form -->
+        <form id="careersForm">
+
+            <!-- Personal Info -->
+            <div class="form-section">
+                <div class="section-title">Personal Information</div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="full_name">Full Name <span class="req">*</span></label>
+                        <input type="text" id="full_name" name="full_name" required placeholder="Jane Smith">
+                    </div>
+                    <div class="field">
+                        <label for="phone">Phone Number <span class="req">*</span></label>
+                        <input type="tel" id="phone" name="phone" required placeholder="(555) 000-0000">
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="email">Email Address <span class="req">*</span></label>
+                        <input type="email" id="email" name="email" required placeholder="jane@email.com">
+                    </div>
+                    <div class="field">
+                        <label for="city">City / Town <span class="req">*</span></label>
+                        <input type="text" id="city" name="city" required placeholder="Your city">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Availability -->
+            <div class="form-section">
+                <div class="section-title">Availability</div>
+                <div class="field field-row single">
+                    <div class="field">
+                        <label for="availability">When are you available to work? <span class="req">*</span></label>
+                        <select id="availability" name="availability" required>
+                            <option value="">Select availability...</option>
+                            <option value="weekdays_daytime">Weekdays – Daytime</option>
+                            <option value="weekdays_evening">Weekdays – Evenings</option>
+                            <option value="weekends">Weekends</option>
+                            <option value="flexible">Flexible / Any time</option>
+                            <option value="live_in">Live-in care</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field">
+                    <label>Do you have reliable transportation? <span class="req">*</span></label>
+                    <div class="radio-group">
+                        <label class="radio-option"><input type="radio" name="transportation" value="yes" required> Yes</label>
+                        <label class="radio-option"><input type="radio" name="transportation" value="no"> No</label>
+                    </div>
+                </div>
+                <div class="field">
+                    <label>Are you willing to take clients on outings?</label>
+                    <div class="radio-group">
+                        <label class="radio-option"><input type="radio" name="willing_outings" value="yes"> Yes</label>
+                        <label class="radio-option"><input type="radio" name="willing_outings" value="no"> No</label>
+                        <label class="radio-option"><input type="radio" name="willing_outings" value="sometimes"> Sometimes</label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Experience -->
+            <div class="form-section">
+                <div class="section-title">Experience &amp; Background</div>
+                <div class="field">
+                    <label for="experience">Describe your caregiving experience <span class="req">*</span></label>
+                    <textarea id="experience" name="experience" required placeholder="Previous caregiving roles, certifications, years of experience..."></textarea>
+                </div>
+                <div class="field">
+                    <label for="why_work_with_seniors">Why do you want to work with seniors? <span class="req">*</span></label>
+                    <textarea id="why_work_with_seniors" name="why_work_with_seniors" required placeholder="Share your motivation..."></textarea>
+                </div>
+            </div>
+
+            <!-- Resume -->
+            <div class="form-section">
+                <div class="section-title">Resume (Optional)</div>
+                <div class="field">
+                    <label for="resume_url">Link to resume (Google Drive, Dropbox, LinkedIn, etc.)</label>
+                    <input type="text" id="resume_url" name="resume_url" placeholder="https://...">
+                </div>
+            </div>
+
+            <button type="submit" class="btn-submit" id="submitBtn">
+                <i class="ph ph-paper-plane-tilt"></i>
+                Submit Application
+            </button>
+
+        </form>
+
+        <!-- Success Screen -->
+        <div class="success-screen" id="successScreen">
+            <div class="success-icon"><i class="ph ph-check-circle"></i></div>
+            <h2>Application Received!</h2>
+            <p>Thank you for applying to SeniorSitters. Our team will review your application and reach out within 3–5 business days.</p>
+            <p style="margin-top:8px;"><a href="careers.html">Submit another application</a></p>
+        </div>
+
+    </div>
+</div>
+
+<div class="page-footer">
+    &copy; <span id="yr"></span> SeniorSitters LLC &mdash; <a href="index.html" style="color:inherit;">Staff Portal</a>
+</div>
+<script>document.getElementById('yr').textContent = new Date().getFullYear();</script>
+
+<script src="js/config.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    // ── Config ────────────────────────────────────────────────────────────────
+    const SUPABASE_URL     = window.CAREHUB_CONFIG.SUPABASE_URL;
+    const SUPABASE_ANON    = window.CAREHUB_CONFIG.SUPABASE_ANON_KEY;
+    const BACKUP_EMAIL     = 'careers@seniorsittersco.com';
+    const EMAILJS_SERVICE  = window.CAREHUB_CONFIG.EMAILJS_SERVICE_ID  || '';
+    const EMAILJS_TEMPLATE = window.CAREHUB_CONFIG.EMAILJS_CAREERS_TEMPLATE || '';
+    const EMAILJS_KEY      = window.CAREHUB_CONFIG.EMAILJS_PUBLIC_KEY  || '';
+
+    // ── Supabase client ───────────────────────────────────────────────────────
+    let sb = null;
+    if (window.supabase && SUPABASE_URL && SUPABASE_ANON) {
+        sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+    }
+
+    // ── UI refs ───────────────────────────────────────────────────────────────
+    const form          = document.getElementById('careersForm');
+    const submitBtn     = document.getElementById('submitBtn');
+    const successScreen = document.getElementById('successScreen');
+    const msgError      = document.getElementById('msgError');
+    const msgErrorText  = document.getElementById('msgErrorText');
+    const msgWarning    = document.getElementById('msgWarning');
+    const msgWarningText= document.getElementById('msgWarningText');
+    const msgSuccess    = document.getElementById('msgSuccess');
+    const msgSuccessText= document.getElementById('msgSuccessText');
+
+    function showMsg(type, text) {
+        [msgError, msgWarning, msgSuccess].forEach(el => el.classList.remove('show'));
+        const el   = type === 'error' ? msgError : type === 'warning' ? msgWarning : msgSuccess;
+        const textEl = type === 'error' ? msgErrorText : type === 'warning' ? msgWarningText : msgSuccessText;
+        textEl.textContent = text;
+        el.classList.add('show');
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function setLoading(on) {
+        submitBtn.disabled = on;
+        submitBtn.innerHTML = on
+            ? '<div class="spinner"></div> Submitting…'
+            : '<i class="ph ph-paper-plane-tilt"></i> Submit Application';
+    }
+
+    // ── Build payload from form ───────────────────────────────────────────────
+    function buildPayload() {
+        const f = form;
+        const get  = id => (f.querySelector('#' + id)?.value || '').trim();
+        const radio = name => f.querySelector(`input[name="${name}"]:checked`)?.value || '';
+
+        return {
+            full_name:            get('full_name'),
+            phone:                get('phone'),
+            email:                get('email').toLowerCase(),
+            city:                 get('city'),
+            availability:         get('availability'),
+            transportation:       radio('transportation'),
+            willing_outings:      radio('willing_outings'),
+            experience:           get('experience'),
+            why_work_with_seniors:get('why_work_with_seniors'),
+            resume_url:           get('resume_url') || null,
+            status:               'new',
+            created_at:           new Date().toISOString(),
+            updated_at:           new Date().toISOString()
+        };
+    }
+
+    // ── Duplicate check ───────────────────────────────────────────────────────
+    async function checkDuplicate(email, phone) {
+        if (!sb) return { duplicate: false };
+        const { data } = await sb
+            .from('applications')
+            .select('id, full_name, created_at')
+            .or(`email.eq.${email},phone.eq.${phone}`)
+            .order('created_at', { ascending: false })
+            .limit(1);
+        if (data && data.length > 0) {
+            return { duplicate: true, existing: data[0] };
+        }
+        return { duplicate: false };
+    }
+
+    // ── Save to Supabase ──────────────────────────────────────────────────────
+    async function saveToSupabase(payload) {
+        if (!sb) {
+            console.warn('[Careers] Supabase not available — skipping DB save.');
+            return { success: false, error: 'Supabase not configured' };
+        }
+        const { data, error } = await sb
+            .from('applications')
+            .insert([payload])
+            .select('id')
+            .single();
+        if (error) {
+            console.error('[Careers] SUPABASE SAVE FAILED:', error);
+            return { success: false, error: error.message };
+        }
+        return { success: true, id: data.id };
+    }
+
+    // ── Send backup email via EmailJS ─────────────────────────────────────────
+    async function sendBackupEmail(payload) {
+        if (!EMAILJS_SERVICE || !EMAILJS_TEMPLATE || !EMAILJS_KEY) {
+            console.warn('[Careers] EmailJS not configured — skipping email backup.');
+            return { sent: false, reason: 'EmailJS not configured' };
+        }
+        if (typeof emailjs === 'undefined') {
+            console.warn('[Careers] EmailJS library not loaded.');
+            return { sent: false, reason: 'EmailJS library missing' };
+        }
+        try {
+            await emailjs.send(EMAILJS_SERVICE, EMAILJS_TEMPLATE, {
+                to_email:             BACKUP_EMAIL,
+                applicant_name:       payload.full_name,
+                applicant_email:      payload.email,
+                applicant_phone:      payload.phone,
+                applicant_city:       payload.city,
+                availability:         payload.availability,
+                transportation:       payload.transportation,
+                willing_outings:      payload.willing_outings,
+                experience:           payload.experience,
+                why_work_with_seniors:payload.why_work_with_seniors,
+                resume_url:           payload.resume_url || 'Not provided',
+                submitted_at:         new Date().toLocaleString()
+            }, EMAILJS_KEY);
+            return { sent: true };
+        } catch (err) {
+            console.error('[Careers] Email backup failed:', err);
+            return { sent: false, reason: err.text || err.message || 'Unknown error' };
+        }
+    }
+
+    // ── Submit handler ────────────────────────────────────────────────────────
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        [msgError, msgWarning, msgSuccess].forEach(el => el.classList.remove('show'));
+        setLoading(true);
+
+        const payload = buildPayload();
+
+        // Validate required radio fields
+        if (!payload.transportation) {
+            showMsg('error', 'Please indicate whether you have reliable transportation.');
+            setLoading(false);
+            return;
+        }
+
+        // Duplicate check
+        const dupCheck = await checkDuplicate(payload.email, payload.phone);
+        if (dupCheck.duplicate) {
+            showMsg('warning',
+                'We already have an application on file with this email or phone number. ' +
+                'If you need to update your application, please contact us directly at ' + BACKUP_EMAIL + '.'
+            );
+            setLoading(false);
+            return;
+        }
+
+        // 1. Try saving to Supabase (primary)
+        const dbResult = await saveToSupabase(payload);
+
+        // 2. Always attempt email backup
+        const emailResult = await sendBackupEmail(payload);
+
+        // 3. Evaluate outcomes
+        if (!dbResult.success && !emailResult.sent) {
+            // Both failed — show error, let them retry
+            showMsg('error',
+                'We were unable to submit your application right now. Please try again in a moment, ' +
+                'or email us directly at ' + BACKUP_EMAIL + '.'
+            );
+            console.error('[Careers] BOTH Supabase and email backup failed.', { dbResult, emailResult });
+            setLoading(false);
+            return;
+        }
+
+        if (!dbResult.success) {
+            // Supabase failed but email backup succeeded
+            console.error('[ADMIN WARNING] Supabase application save failed. Email backup was sent. Error:', dbResult.error);
+            showMsg('warning',
+                'Your application was received via email backup. Our team will process it manually. ' +
+                'If you have questions, contact ' + BACKUP_EMAIL + '.'
+            );
+        }
+
+        if (!emailResult.sent && dbResult.success) {
+            // Email backup failed but Supabase saved — still a full success
+            console.warn('[Careers] Email backup failed but Supabase save succeeded. Reason:', emailResult.reason);
+        }
+
+        // Success — show confirmation, hide form
+        form.style.display = 'none';
+        successScreen.classList.add('show');
+        setLoading(false);
+    });
+
+})();
+</script>
+
+</body>
+</html>
