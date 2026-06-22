@@ -465,6 +465,11 @@ async function getCaregivers(filters = {}) {
         if (window.DEBUG) console.log('[CareHub] Filtering by status:', filters.status);
     }
 
+    if (filters.activation_status) {
+        query = query.eq('activation_status', filters.activation_status);
+        if (window.DEBUG) console.log('[CareHub] Filtering by activation_status:', filters.activation_status);
+    }
+
     const { data, error } = await query;
 
     if (error) {
@@ -590,6 +595,13 @@ async function createCaregiverFromApplication(application) {
 
     if (!notification) {
         console.warn('[CareHub] Failed to create notification, but caregiver was created');
+    }
+
+    // Phase 2: assign required training modules and create document placeholders
+    try {
+        await assignRequiredTrainingAndDocuments(data.id);
+    } catch (e) {
+        console.warn('[CareHub] Could not auto-assign training/documents for new caregiver:', e);
     }
 
     return data;
@@ -1288,37 +1300,41 @@ async function getProfileByCaregiverId(caregiverId) {
 }
 
 /**
- * Check whether a caregiver (by caregivers.id) has passed Level 1 Orientation
+ * Check whether a caregiver has completed all required training modules.
+ * This is the primary training gate used by the portal and scheduling.
  * @param {string} caregiverId - caregivers.id
  * @returns {Promise<boolean>}
  */
 async function isCaregiverTrainingComplete(caregiverId) {
-    // Fail-open: if the client isn't ready or any lookup fails, return true
-    // (do NOT block the caregiver) rather than trapping them on training forever.
     if (!supabaseClient) {
         console.warn('[CareHub] isCaregiverTrainingComplete: no supabase client — fail-open');
         return true;
     }
     try {
-        const profile = await getProfileByCaregiverId(caregiverId);
-        if (!profile || !profile.id) {
-            // No profiles row yet (invite not accepted, RLS block, etc.) — fail-open
-            console.warn('[CareHub] isCaregiverTrainingComplete: no profile for caregiverId', caregiverId, '— fail-open');
+        const { data: requiredModules, error: reqErr } = await supabaseClient
+            .from(TABLES.TRAINING_MODULES)
+            .select('id')
+            .eq('is_active', true)
+            .eq('is_required', true);
+        if (reqErr) {
+            console.error('[CareHub] isCaregiverTrainingComplete error:', reqErr.message, '— fail-open');
             return true;
         }
-        const { data, error } = await supabaseClient
-            .from('training_progress')
-            .select('status, score, completed_at')
-            .eq('user_id', profile.id)
-            .eq('module_id', 'level_1_orientation')
-            .limit(1)
-            .maybeSingle();
-        if (error) {
-            console.error('[CareHub] isCaregiverTrainingComplete error:', error.message, '— fail-open');
-            return true; // RLS error or missing table — fail-open
+        const requiredIds = (requiredModules || []).map(m => m.id);
+        if (requiredIds.length === 0) return true; // no required modules configured
+
+        const { data: completed, error: compErr } = await supabaseClient
+            .from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+            .select('module_id')
+            .eq('caregiver_id', caregiverId)
+            .eq('status', 'completed')
+            .in('module_id', requiredIds);
+        if (compErr) {
+            console.error('[CareHub] isCaregiverTrainingComplete error:', compErr.message, '— fail-open');
+            return true;
         }
-        if (!data) return false; // Row exists for profile but no training record — not started
-        return data.status === 'passed' && data.score >= 80 && data.completed_at !== null;
+        const completedIds = new Set((completed || []).map(c => c.module_id));
+        return completedIds.size >= requiredIds.length;
     } catch (e) {
         console.error('[CareHub] isCaregiverTrainingComplete exception:', e, '— fail-open');
         return true;
@@ -1643,6 +1659,65 @@ async function getDashboardAlerts() {
             });
         });
 
+        // Phase 3: caregivers needing training
+        const { data: needTraining } = await supabaseClient
+            .from(TABLES.CAREGIVERS)
+            .select('id, name')
+            .eq('activation_status', 'training_required')
+            .limit(5);
+
+        (needTraining || []).forEach(c => {
+            alerts.push({
+                type: 'training_required',
+                severity: 'warning',
+                title: 'Training Required',
+                message: `${c.name} needs to complete required training`,
+                link: `/caregivers`,
+                action: 'Review',
+                icon: 'ph-graduation-cap'
+            });
+        });
+
+        // Phase 3: overdue training assignments
+        const todayIso = new Date().toISOString();
+        const { data: overdueTraining } = await supabaseClient
+            .from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
+            .select('id, due_date, caregiver:caregiver_id (id, name), module:module_id (title)')
+            .lt('due_date', todayIso)
+            .neq('status', 'completed')
+            .limit(5);
+
+        (overdueTraining || []).forEach(a => {
+            alerts.push({
+                type: 'training_overdue',
+                severity: 'urgent',
+                title: 'Training Overdue',
+                message: `${a.caregiver?.name || 'A caregiver'} has overdue training: ${a.module?.title || 'module'}`,
+                link: `/caregivers`,
+                action: 'Review',
+                icon: 'ph-warning-circle'
+            });
+        });
+
+        // Phase 3: training complete and ready for activation
+        const { data: readyForActivation } = await supabaseClient
+            .from(TABLES.CAREGIVERS)
+            .select('id, name')
+            .eq('activation_status', 'documents_required')
+            .limit(5);
+
+        (readyForActivation || []).forEach(c => {
+            alerts.push({
+                type: 'training_complete',
+                severity: 'info',
+                title: 'Training Complete — Ready for Activation',
+                message: `${c.name} completed all required training. Review documents/background check to activate.`,
+                link: `/caregivers`,
+                action: 'Activate',
+                icon: 'ph-check-circle'
+            });
+        });
+
         const { data: rejectedTimesheets } = await supabaseClient
             .from(TABLES.TIMESHEETS)
             .select('id, date, caregiver:caregiver_id (name)')
@@ -1894,18 +1969,18 @@ async function getScheduleById(id) {
 async function createSchedule(scheduleData) {
     if (!supabaseClient) return null;
 
-    // Training gate: if a caregiver is specified, ensure they completed Level 1
+    // Activation gate: caregiver must be fully active (training + documents + background check)
     if (scheduleData.caregiver_id) {
         try {
-            const eligible = await isCaregiverTrainingComplete(scheduleData.caregiver_id);
+            const eligible = await isCaregiverEligibleForScheduling(scheduleData.caregiver_id);
             if (!eligible) {
                 if (typeof window.showToast === 'function') {
-                    window.showToast('This caregiver must complete training before visits can be scheduled.', 'error');
+                    window.showToast('This caregiver is not yet active. Complete training, required documents, and background check before scheduling.', 'error');
                 }
                 return null;
             }
         } catch (e) {
-            console.warn('[CareHub] Training eligibility check failed, proceeding with caution', e);
+            console.warn('[CareHub] Activation eligibility check failed, proceeding with caution', e);
         }
     }
 
@@ -1951,6 +2026,21 @@ async function updateSchedule(id, updates) {
     if (!supabaseClient) return false;
 
     if (window.DEBUG) console.log('[CareHub] updateSchedule called with id:', id);
+
+    // Activation gate: if caregiver is being changed, verify eligibility
+    if (updates.caregiver_id) {
+        try {
+            const eligible = await isCaregiverEligibleForScheduling(updates.caregiver_id);
+            if (!eligible) {
+                if (typeof window.showToast === 'function') {
+                    window.showToast('This caregiver is not yet active. Complete training, required documents, and background check before scheduling.', 'error');
+                }
+                return false;
+            }
+        } catch (e) {
+            console.warn('[CareHub] Activation eligibility check failed during update, proceeding with caution', e);
+        }
+    }
 
     // Whitelist only columns that exist in schedules table
     const allowedColumns = [
@@ -3302,74 +3392,86 @@ async function updateTrainingAssignment(id, updates, { sendNotification = false,
 
 async function markTrainingComplete(id, { completedBy = null, score = null } = {}) {
     if (!supabaseClient) return false;
-    const now = new Date().toISOString();
 
     const assignment = await getTrainingAssignmentById(id);
     if (!assignment) return false;
 
-    const { error } = await supabaseClient.from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
-        .update({
-            status: 'completed',
-            completed_at: now,
-            completed_by: completedBy,
-            score: score
-        })
-        .eq('id', id);
-    if (error) { console.error('[CareHub] markTrainingComplete error:', error.message); return false; }
-
-    // Create notification for admin
-    const session = getSession();
-    const isAdmin = session && (session.role === 'admin_owner' || session.role === 'co_owner');
-    if (!isAdmin) {
-        await createNotification({
-            type: 'training_completed',
-            title: 'Training Completed',
-            message: `${assignment.caregivers?.name || 'A caregiver'} completed "${assignment.training_modules?.title || 'training'}"`,
-            recipient_role: 'admin_owner',
-            priority: 'normal',
-            related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
-            related_record_id: id,
-            caregiver_id: assignment.caregiver_id
+    try {
+        const { data: ok, error } = await supabaseClient.rpc('mark_training_assignment_complete', {
+            p_assignment_id: id,
+            p_score: score
         });
-    }
+        if (error || !ok) {
+            console.error('[CareHub] markTrainingComplete error:', error?.message || 'RPC returned false');
+            return false;
+        }
 
-    return true;
+        // Create notification for admin
+        const session = getSession();
+        const isAdmin = session && (session.role === 'admin_owner' || session.role === 'co_owner');
+        if (!isAdmin) {
+            await createNotification({
+                type: 'training_completed',
+                title: 'Training Completed',
+                message: `${assignment.caregivers?.name || 'A caregiver'} completed "${assignment.training_modules?.title || 'training'}"`,
+                recipient_role: 'admin_owner',
+                priority: 'normal',
+                related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
+                related_record_id: id,
+                caregiver_id: assignment.caregiver_id
+            });
+        }
+
+        // Phase 3: notify admin when all required training is done
+        await notifyIfTrainingComplete(assignment.caregiver_id);
+
+        return true;
+    } catch (e) {
+        console.error('[CareHub] markTrainingComplete exception:', e);
+        return false;
+    }
 }
 
 async function acknowledgeTraining(id, { completedBy = null } = {}) {
     if (!supabaseClient) return false;
-    const now = new Date().toISOString();
 
     const assignment = await getTrainingAssignmentById(id);
     if (!assignment) return false;
 
-    const { error } = await supabaseClient.from(TABLES.CAREGIVER_TRAINING_ASSIGNMENTS)
-        .update({
-            acknowledged_at: now,
-            status: 'completed',
-            completed_at: now,
-            completed_by: completedBy
-        })
-        .eq('id', id);
-    if (error) { console.error('[CareHub] acknowledgeTraining error:', error.message); return false; }
-
-    // Create notification for admin
-    const session = getSession();
-    const isAdmin = session && (session.role === 'admin_owner' || session.role === 'co_owner');
-    if (!isAdmin) {
-        await createNotification({
-            type: 'training_acknowledged',
-            title: 'Training Acknowledged',
-            message: `${assignment.caregivers?.name || 'A caregiver'} acknowledged "${assignment.training_modules?.title || 'training'}"`,
-            recipient_role: 'admin_owner',
-            priority: 'normal',
-            related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
-            related_record_id: id,
-            caregiver_id: assignment.caregiver_id
+    try {
+        const { data: ok, error } = await supabaseClient.rpc('mark_training_assignment_complete', {
+            p_assignment_id: id,
+            p_acknowledged: true
         });
-    }
+        if (error || !ok) {
+            console.error('[CareHub] acknowledgeTraining error:', error?.message || 'RPC returned false');
+            return false;
+        }
 
-    return true;
+        // Create notification for admin
+        const session = getSession();
+        const isAdmin = session && (session.role === 'admin_owner' || session.role === 'co_owner');
+        if (!isAdmin) {
+            await createNotification({
+                type: 'training_acknowledged',
+                title: 'Training Acknowledged',
+                message: `${assignment.caregivers?.name || 'A caregiver'} acknowledged "${assignment.training_modules?.title || 'training'}"`,
+                recipient_role: 'admin_owner',
+                priority: 'normal',
+                related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
+                related_record_id: id,
+                caregiver_id: assignment.caregiver_id
+            });
+        }
+
+        // Phase 3: notify admin when all required training is done
+        await notifyIfTrainingComplete(assignment.caregiver_id);
+
+        return true;
+    } catch (e) {
+        console.error('[CareHub] acknowledgeTraining exception:', e);
+        return false;
+    }
 }
 
 async function getTrainingAssignmentById(id) {
@@ -3687,6 +3789,779 @@ function _isOverdue(dateString) {
     return date < now;
 }
 
+// ==================== QUIZ ENGINE ====================
+
+async function getQuizQuestions(moduleId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.QUIZ_QUESTIONS)
+        .select('*')
+        .eq('module_id', moduleId)
+        .eq('is_active', true)
+        .order('sort_order', { ascending: true })
+        .order('created_at', { ascending: true });
+    if (error) { console.error('[CareHub] getQuizQuestions error:', error.message); return []; }
+    return data || [];
+}
+
+async function getQuizAttemptHistory(assignmentId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.QUIZ_ATTEMPTS)
+        .select('*')
+        .eq('assignment_id', assignmentId)
+        .order('attempt_number', { ascending: true });
+    if (error) { console.error('[CareHub] getQuizAttemptHistory error:', error.message); return []; }
+    return data || [];
+}
+
+async function getQuizAttemptsForCaregiver(caregiverId, moduleId = null) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient.from(TABLES.QUIZ_ATTEMPTS).select('*, training_modules(*)').eq('caregiver_id', caregiverId).order('completed_at', { ascending: false });
+    if (moduleId) q = q.eq('module_id', moduleId);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getQuizAttemptsForCaregiver error:', error.message); return []; }
+    return data || [];
+}
+
+async function submitQuizAttempt({ assignmentId, caregiverId, moduleId, answers, score, passed }) {
+    if (!supabaseClient) return null;
+
+    const { data: prevAttempts, error: countErr } = await supabaseClient
+        .from(TABLES.QUIZ_ATTEMPTS)
+        .select('attempt_number')
+        .eq('assignment_id', assignmentId)
+        .order('attempt_number', { ascending: false })
+        .limit(1);
+    if (countErr) { console.error('[CareHub] submitQuizAttempt count error:', countErr.message); return null; }
+    const attemptNumber = (prevAttempts && prevAttempts.length > 0 ? prevAttempts[0].attempt_number : 0) + 1;
+
+    const now = new Date().toISOString();
+    const { data, error } = await supabaseClient
+        .from(TABLES.QUIZ_ATTEMPTS)
+        .insert([{
+            assignment_id: assignmentId,
+            caregiver_id: caregiverId,
+            module_id: moduleId,
+            attempt_number: attemptNumber,
+            score: Math.round(score),
+            passed: !!passed,
+            answers: answers || [],
+            completed_at: now
+        }])
+        .select()
+        .single();
+    if (error) { console.error('[CareHub] submitQuizAttempt error:', error.message); return null; }
+
+    if (passed) {
+        await markTrainingComplete(assignmentId, { score: Math.round(score) });
+        await issueTrainingCertificate(caregiverId, assignmentId, moduleId, Math.round(score));
+    }
+
+    return data;
+}
+
+async function getNextQuizAttemptNumber(assignmentId) {
+    if (!supabaseClient) return 1;
+    const { data, error } = await supabaseClient
+        .from(TABLES.QUIZ_ATTEMPTS)
+        .select('attempt_number')
+        .eq('assignment_id', assignmentId)
+        .order('attempt_number', { ascending: false })
+        .limit(1);
+    if (error) { console.error('[CareHub] getNextQuizAttemptNumber error:', error.message); return 1; }
+    return (data && data.length > 0 ? data[0].attempt_number : 0) + 1;
+}
+
+// ==================== DOCUMENTS ====================
+
+async function getCaregiverDocuments(caregiverId, documentType = null) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient.from(TABLES.CAREGIVER_DOCUMENTS).select('*').eq('caregiver_id', caregiverId).order('created_at', { ascending: true });
+    if (documentType) q = q.eq('document_type', documentType);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getCaregiverDocuments error:', error.message); return []; }
+    return data || [];
+}
+
+async function getAllCaregiverDocuments(filters = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient.from(TABLES.CAREGIVER_DOCUMENTS).select('*, caregivers(id, name, email)').order('uploaded_at', { ascending: false });
+    if (filters.status) q = q.eq('status', filters.status);
+    if (filters.caregiverId) q = q.eq('caregiver_id', filters.caregiverId);
+    if (filters.documentType) q = q.eq('document_type', filters.documentType);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getAllCaregiverDocuments error:', error.message); return []; }
+    return data || [];
+}
+
+async function createCaregiverDocument(doc) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_DOCUMENTS)
+        .upsert([{
+            caregiver_id: doc.caregiver_id,
+            document_type: doc.document_type,
+            file_url: doc.file_url,
+            file_name: doc.file_name || null,
+            file_size: doc.file_size || null,
+            mime_type: doc.mime_type || null,
+            status: doc.status || 'pending',
+            expires_on: doc.expires_on || null,
+            uploaded_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        }], { onConflict: 'caregiver_id,document_type' })
+        .select()
+        .single();
+    if (error) { console.error('[CareHub] createCaregiverDocument error:', error.message); return null; }
+    return data;
+}
+
+async function reviewCaregiverDocument(id, { status, reviewedBy, adminNotes }) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_DOCUMENTS)
+        .update({
+            status,
+            reviewed_by: reviewedBy,
+            reviewed_at: new Date().toISOString(),
+            admin_notes: adminNotes || null,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', id);
+    if (error) { console.error('[CareHub] reviewCaregiverDocument error:', error.message); return false; }
+    return true;
+}
+
+async function deleteCaregiverDocument(id) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_DOCUMENTS).delete().eq('id', id);
+    if (error) { console.error('[CareHub] deleteCaregiverDocument error:', error.message); return false; }
+    return true;
+}
+
+// ==================== CERTIFICATES ====================
+
+async function getCaregiverCertificates(caregiverId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_CERTIFICATES)
+        .select('*, training_modules(title)')
+        .eq('caregiver_id', caregiverId)
+        .order('issued_at', { ascending: false });
+    if (error) { console.error('[CareHub] getCaregiverCertificates error:', error.message); return []; }
+    return data || [];
+}
+
+async function getCertificateById(id) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient
+        .from(TABLES.CAREGIVER_CERTIFICATES)
+        .select('*, caregivers(id, name), training_modules(title)')
+        .eq('id', id)
+        .single();
+    if (error) { console.error('[CareHub] getCertificateById error:', error.message); return null; }
+    return data;
+}
+
+async function issueTrainingCertificate(caregiverId, assignmentId, moduleId, score) {
+    if (!supabaseClient) return null;
+    const caregiver = await getCaregiverById(caregiverId);
+    const module = await getTrainingModuleById(moduleId);
+    try {
+        const { data: certId, error } = await supabaseClient.rpc('issue_training_certificate', {
+            p_caregiver_id: caregiverId,
+            p_assignment_id: assignmentId,
+            p_module_id: moduleId,
+            p_score: Math.round(score)
+        });
+        if (error) { console.error('[CareHub] issueTrainingCertificate error:', error.message); return null; }
+
+        await createNotification({
+            type: 'training_certificate_issued',
+            title: 'Certificate Issued',
+            message: `${caregiver?.name || 'A caregiver'} earned a certificate for ${module?.title || 'training'}`,
+            caregiver_id: caregiverId,
+            recipient_role: 'caregiver',
+            priority: 'normal',
+            related_table: TABLES.CAREGIVER_CERTIFICATES,
+            related_record_id: certId
+        });
+
+        return { id: certId, caregiver_id: caregiverId, assignment_id: assignmentId, module_id: moduleId, module_name: module?.title || 'Training Module', score: Math.round(score) };
+    } catch (e) {
+        console.error('[CareHub] issueTrainingCertificate exception:', e);
+        return null;
+    }
+}
+
+// ==================== ACTIVATION WORKFLOW ====================
+
+async function refreshCaregiverActivation(caregiverId) {
+    if (!supabaseClient) return null;
+    try {
+        const { data, error } = await supabaseClient.rpc('refresh_caregiver_activation', { p_caregiver_id: caregiverId });
+        if (error) { console.error('[CareHub] refreshCaregiverActivation error:', error.message); return null; }
+        return data;
+    } catch (e) {
+        console.error('[CareHub] refreshCaregiverActivation exception:', e);
+        return null;
+    }
+}
+
+async function getCaregiverActivationStatus(caregiverId) {
+    const cg = await getCaregiverById(caregiverId);
+    if (!cg) return null;
+    return cg.activation_status || 'training_required';
+}
+
+async function isCaregiverEligibleForScheduling(caregiverId) {
+    if (!supabaseClient) {
+        console.warn('[CareHub] isCaregiverEligibleForScheduling: no supabase client — fail-open');
+        return true;
+    }
+    try {
+        const caregiver = await getCaregiverById(caregiverId);
+        if (!caregiver) {
+            console.warn('[CareHub] isCaregiverEligibleForScheduling: caregiver not found');
+            return false;
+        }
+
+        // Phase 3: scheduling is gated only by the explicit activation_status workflow.
+        return caregiver.activation_status === 'active' && caregiver.status === 'active';
+    } catch (e) {
+        console.error('[CareHub] isCaregiverEligibleForScheduling exception:', e, '— fail-open');
+        return true;
+    }
+}
+
+async function getEligibleCaregiversForScheduling() {
+    if (!supabaseClient) return [];
+    try {
+        const caregivers = await getCaregivers();
+        const eligible = [];
+        for (const cg of caregivers) {
+            if (await isCaregiverEligibleForScheduling(cg.id)) eligible.push(cg);
+        }
+        return eligible;
+    } catch (e) {
+        console.error('[CareHub] getEligibleCaregiversForScheduling error:', e);
+        return [];
+    }
+}
+
+async function getCaregiverActivationSummary(caregiverId) {
+    if (!supabaseClient) return null;
+    const [assignments, docs, caregiver, forms, templates] = await Promise.all([
+        getTrainingAssignments({ caregiverId }),
+        getCaregiverDocuments(caregiverId),
+        getCaregiverById(caregiverId),
+        getCaregiverFormAcknowledgements(caregiverId),
+        getCaregiverFormTemplates({ activeOnly: true, requiredOnly: true })
+    ]);
+
+    const requiredModules = await supabaseClient
+        .from(TABLES.TRAINING_MODULES)
+        .select('id, title')
+        .eq('is_active', true)
+        .eq('is_required', true);
+
+    const requiredDocTypes = ['drivers_license','auto_insurance','w9','direct_deposit','background_check_authorization'];
+    const docMap = {};
+    requiredDocTypes.forEach(t => { docMap[t] = { type: t, status: 'missing', label: _documentTypeLabel(t) }; });
+    docs.forEach(d => {
+        if (docMap[d.document_type]) docMap[d.document_type].status = d.status;
+    });
+
+    const moduleMap = {};
+    (requiredModules.data || []).forEach(m => { moduleMap[m.id] = { ...m, status: 'not_assigned' }; });
+    assignments.filter(a => moduleMap[a.module_id]).forEach(a => {
+        moduleMap[a.module_id].status = a.status;
+        moduleMap[a.module_id].score = a.score;
+        moduleMap[a.module_id].due_date = a.due_date;
+    });
+
+    const signedForms = forms.filter(f => f.full_name_typed && f.full_name_typed !== 'PENDING').length;
+
+    return {
+        caregiver: caregiver,
+        activationStatus: caregiver?.activation_status || 'training_required',
+        training: {
+            totalRequired: (requiredModules.data || []).length,
+            completed: assignments.filter(a => a.status === 'completed').length,
+            overdue: assignments.filter(a => a.status !== 'completed' && a.due_date && _isOverdue(a.due_date)).length,
+            modules: Object.values(moduleMap)
+        },
+        documents: {
+            totalRequired: requiredDocTypes.length,
+            approved: docs.filter(d => d.status === 'approved').length,
+            items: Object.values(docMap)
+        },
+        forms: {
+            totalRequired: templates.length,
+            signed: signedForms
+        },
+        backgroundCheck: caregiver?.background_check_status || 'pending',
+        isEligible: await isCaregiverEligibleForScheduling(caregiverId)
+    };
+}
+
+function _documentTypeLabel(type) {
+    const map = {
+        drivers_license: "Driver's License",
+        auto_insurance: 'Auto Insurance',
+        vehicle_registration: 'Vehicle Registration',
+        background_check_authorization: 'Background Check Authorization',
+        w9: 'W9',
+        direct_deposit: 'Direct Deposit Form',
+        cpr_first_aid_certificate: 'CPR / First Aid Certificate',
+        signed_policies: 'Signed Policies'
+    };
+    return map[type] || type;
+}
+
+function _isOverdue(dueDate) {
+    if (!dueDate) return false;
+    return new Date(dueDate) < new Date(new Date().setHours(0, 0, 0, 0));
+}
+
+// ==================== FORM TEMPLATES & ELECTRONIC SIGNATURES ====================
+
+async function getCaregiverFormTemplates({ activeOnly = true, requiredOnly = false } = {}) {
+    if (!supabaseClient) return [];
+    let q = supabaseClient.from(TABLES.CAREGIVER_FORM_TEMPLATES).select('*').order('sort_order', { ascending: true }).order('title');
+    if (activeOnly) q = q.eq('is_active', true);
+    if (requiredOnly) q = q.eq('is_required', true);
+    const { data, error } = await q;
+    if (error) { console.error('[CareHub] getCaregiverFormTemplates error:', error.message); return []; }
+    return data || [];
+}
+
+async function getCaregiverFormTemplateById(id) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_TEMPLATES).select('*').eq('id', id).single();
+    if (error) { console.error('[CareHub] getCaregiverFormTemplateById error:', error.message); return null; }
+    return data;
+}
+
+async function createCaregiverFormTemplate(template) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_TEMPLATES)
+        .insert([{ ...template, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }])
+        .select().single();
+    if (error) { console.error('[CareHub] createCaregiverFormTemplate error:', error.message); return null; }
+    return data;
+}
+
+async function updateCaregiverFormTemplate(id, updates) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_TEMPLATES)
+        .update({ ...updates, updated_at: new Date().toISOString() })
+        .eq('id', id);
+    if (error) { console.error('[CareHub] updateCaregiverFormTemplate error:', error.message); return false; }
+    return true;
+}
+
+async function deleteCaregiverFormTemplate(id) {
+    if (!supabaseClient) return false;
+    const { error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_TEMPLATES).delete().eq('id', id);
+    if (error) { console.error('[CareHub] deleteCaregiverFormTemplate error:', error.message); return false; }
+    return true;
+}
+
+async function getCaregiverFormAcknowledgements(caregiverId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_ACKNOWLEDGEMENTS)
+        .select('*, caregiver_form_templates(*)')
+        .eq('caregiver_id', caregiverId)
+        .order('acknowledged_at', { ascending: false });
+    if (error) { console.error('[CareHub] getCaregiverFormAcknowledgements error:', error.message); return []; }
+    return data || [];
+}
+
+async function getAllCaregiverFormAcknowledgements(limit = 50) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_ACKNOWLEDGEMENTS)
+        .select('*, caregiver_form_templates(*), caregivers(id, name)')
+        .order('acknowledged_at', { ascending: false })
+        .limit(limit);
+    if (error) { console.error('[CareHub] getAllCaregiverFormAcknowledgements error:', error.message); return []; }
+    return data || [];
+}
+
+async function getCaregiverFormAcknowledgement(caregiverId, templateId) {
+    if (!supabaseClient) return null;
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_ACKNOWLEDGEMENTS)
+        .select('*, caregiver_form_templates(*)')
+        .eq('caregiver_id', caregiverId)
+        .eq('form_template_id', templateId)
+        .maybeSingle();
+    if (error) { console.error('[CareHub] getCaregiverFormAcknowledgement error:', error.message); return null; }
+    return data;
+}
+
+async function signCaregiverForm({ caregiverId, templateId, fullNameTyped }) {
+    if (!supabaseClient) return null;
+    const template = await getCaregiverFormTemplateById(templateId);
+    if (!template) return null;
+
+    const ip = null; // browsers cannot reliably read client IP; filled server-side if possible
+    const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : null;
+
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_FORM_ACKNOWLEDGEMENTS)
+        .upsert([{
+            caregiver_id: caregiverId,
+            form_template_id: templateId,
+            full_name_typed: fullNameTyped,
+            acknowledged_at: new Date().toISOString(),
+            document_version: template.version,
+            form_content_snapshot: template.content,
+            ip_address: ip,
+            user_agent: userAgent,
+            created_at: new Date().toISOString()
+        }], { onConflict: 'caregiver_id,form_template_id' })
+        .select().single();
+    if (error) { console.error('[CareHub] signCaregiverForm error:', error.message); return null; }
+
+    await createNotification({
+        type: 'form_signed',
+        title: 'Form Signed',
+        message: `${template.title} was signed by a caregiver.`,
+        caregiver_id: caregiverId,
+        recipient_role: 'admin_owner',
+        priority: 'normal',
+        related_table: TABLES.CAREGIVER_FORM_ACKNOWLEDGEMENTS,
+        related_record_id: data?.id
+    });
+
+    return data;
+}
+
+async function getCaregiverActivationReviews(caregiverId) {
+    if (!supabaseClient) return [];
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_ACTIVATION_REVIEWS)
+        .select('*, profiles:reviewed_by(id, email)')
+        .eq('caregiver_id', caregiverId)
+        .order('reviewed_at', { ascending: false });
+    if (error) { console.error('[CareHub] getCaregiverActivationReviews error:', error.message); return []; }
+    return data || [];
+}
+
+async function createActivationReview({ caregiverId, decision, notes, overrideReason }) {
+    if (!supabaseClient) return null;
+    const session = getSession();
+    const { data, error } = await supabaseClient.from(TABLES.CAREGIVER_ACTIVATION_REVIEWS)
+        .insert([{
+            caregiver_id: caregiverId,
+            reviewed_by: getCurrentUserId(),
+            reviewed_at: new Date().toISOString(),
+            decision,
+            notes: notes || null,
+            override_reason: overrideReason || null
+        }])
+        .select().single();
+    if (error) { console.error('[CareHub] createActivationReview error:', error.message); return null; }
+
+    if (decision === 'approved') {
+        await supabaseClient.from(TABLES.CAREGIVERS).update({
+            activation_status: 'active',
+            status: 'active',
+            updated_at: new Date().toISOString()
+        }).eq('id', caregiverId);
+    } else if (decision === 'rejected' || decision === 'flagged') {
+        await supabaseClient.from(TABLES.CAREGIVERS).update({
+            activation_status: decision === 'flagged' ? 'inactive' : 'rejected',
+            status: 'onboarding',
+            updated_at: new Date().toISOString()
+        }).eq('id', caregiverId);
+    }
+
+    await createNotification({
+        type: `activation_${decision}`,
+        title: `Activation ${decision.charAt(0).toUpperCase() + decision.slice(1)}`,
+        message: notes || `Caregiver activation was ${decision}.`,
+        caregiver_id: caregiverId,
+        recipient_role: decision === 'approved' ? 'caregiver' : 'admin_owner',
+        priority: 'high',
+        related_table: TABLES.CAREGIVER_ACTIVATION_REVIEWS,
+        related_record_id: data?.id
+    });
+
+    return data;
+}
+
+async function createOnboardingPlaceholders(caregiverId, { dueDays = 7 } = {}) {
+    if (!supabaseClient) return false;
+    try {
+        const { data, error } = await supabaseClient.rpc('create_onboarding_placeholders', {
+            p_caregiver_id: caregiverId,
+            p_due_days: dueDays,
+            p_assigned_by: getCurrentUserId()
+        });
+        if (error) { console.error('[CareHub] createOnboardingPlaceholders error:', error.message); return false; }
+        return data;
+    } catch (e) {
+        console.error('[CareHub] createOnboardingPlaceholders exception:', e);
+        return false;
+    }
+}
+
+async function getCaregiverOnboardingSummary(caregiverId) {
+    if (!supabaseClient) return null;
+    const [caregiver, assignments, docs, forms, templates] = await Promise.all([
+        getCaregiverById(caregiverId),
+        getTrainingAssignments({ caregiverId }),
+        getCaregiverDocuments(caregiverId),
+        getCaregiverFormAcknowledgements(caregiverId),
+        getCaregiverFormTemplates({ activeOnly: true, requiredOnly: true })
+    ]);
+
+    if (!caregiver) return null;
+
+    const requiredModules = await supabaseClient.from(TABLES.TRAINING_MODULES)
+        .select('id, title')
+        .eq('is_active', true)
+        .eq('is_required', true);
+    const requiredModuleIds = new Set((requiredModules.data || []).map(m => m.id));
+
+    const requiredAssignments = assignments.filter(a => requiredModuleIds.has(a.module_id));
+    const completedTraining = requiredAssignments.filter(a => a.status === 'completed').length;
+    const totalTraining = requiredModuleIds.size;
+    const inProgressTraining = requiredAssignments.filter(a => a.status === 'in_progress').length;
+    const overdueTraining = requiredAssignments.filter(a => a.status !== 'completed' && a.due_date && _isOverdue(a.due_date)).length;
+
+    const requiredDocTypes = ['drivers_license','auto_insurance','w9','direct_deposit','background_check_authorization'];
+    const docMap = {};
+    requiredDocTypes.forEach(t => { docMap[t] = { type: t, status: 'missing', label: _documentTypeLabel(t) }; });
+    docs.forEach(d => { if (docMap[d.document_type]) docMap[d.document_type].status = d.status; });
+    const approvedDocs = Object.values(docMap).filter(d => d.status === 'approved').length;
+    const totalDocs = requiredDocTypes.length;
+    const pendingReviewDocs = Object.values(docMap).filter(d => ['pending','rejected'].includes(d.status)).length;
+
+    const signedForms = forms.filter(f => f.full_name_typed && f.full_name_typed !== 'PENDING').length;
+    const totalForms = templates.length;
+    const formItems = templates.map(t => {
+        const signed = forms.find(f => f.form_template_id === t.id && f.full_name_typed && f.full_name_typed !== 'PENDING');
+        return { ...t, signed: !!signed, signedAt: signed?.acknowledged_at };
+    });
+
+    const steps = [
+        { id: 'training', label: 'Complete required training', complete: totalTraining > 0 && completedTraining >= totalTraining, inProgress: inProgressTraining > 0, overdue: overdueTraining > 0 },
+        { id: 'documents', label: 'Upload required documents', complete: approvedDocs >= totalDocs, inProgress: pendingReviewDocs > 0, blocked: pendingReviewDocs > 0 },
+        { id: 'forms', label: 'Sign required policies/forms', complete: signedForms >= totalForms, inProgress: signedForms > 0 && signedForms < totalForms },
+        { id: 'background', label: 'Background check cleared', complete: ['cleared','waived'].includes(caregiver.background_check_status), blocked: caregiver.background_check_status === 'failed' },
+        { id: 'review', label: 'Admin final review', complete: caregiver.activation_status === 'active', blocked: caregiver.activation_status === 'rejected', pending: caregiver.activation_status === 'ready_for_final_review' }
+    ];
+
+    const completedSteps = steps.filter(s => s.complete).length;
+    const percentage = Math.round((completedSteps / steps.length) * 100);
+
+    const nextStep = steps.find(s => !s.complete && !s.blocked) || steps[steps.length - 1];
+
+    return {
+        caregiver,
+        activationStatus: caregiver.activation_status,
+        percentage,
+        steps,
+        nextStep,
+        training: { total: totalTraining, completed: completedTraining, inProgress: inProgressTraining, overdue: overdueTraining, items: requiredAssignments },
+        documents: { total: totalDocs, approved: approvedDocs, pendingReview: pendingReviewDocs, items: Object.values(docMap) },
+        forms: { total: totalForms, signed: signedForms, items: formItems },
+        backgroundCheck: caregiver.background_check_status,
+        isEligible: caregiver.activation_status === 'active'
+    };
+}
+
+/**
+ * Compute the Phase 3 training badge for a caregiver.
+ * Returns one of: 'active', 'training_overdue', 'training_in_progress', 'training_required'.
+ */
+async function getCaregiverTrainingBadge(caregiverId) {
+    if (!supabaseClient) return 'training_required';
+    const [caregiver, assignments] = await Promise.all([
+        getCaregiverById(caregiverId),
+        getTrainingAssignments({ caregiverId })
+    ]);
+
+    const requiredModules = await supabaseClient
+        .from(TABLES.TRAINING_MODULES)
+        .select('id')
+        .eq('is_active', true)
+        .eq('is_required', true);
+
+    const requiredIds = new Set((requiredModules.data || []).map(m => m.id));
+    const requiredAssignments = assignments.filter(a => requiredIds.has(a.module_id));
+
+    if (caregiver?.activation_status === 'active') {
+        return 'active';
+    }
+
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const overdue = requiredAssignments.some(a => a.status !== 'completed' && a.due_date && new Date(a.due_date) < startOfDay);
+    if (overdue) return 'training_overdue';
+
+    const anyStarted = requiredAssignments.some(a => a.status === 'in_progress' || a.status === 'completed');
+    const allCompleted = requiredAssignments.length > 0 && requiredAssignments.every(a => a.status === 'completed');
+
+    if (anyStarted && !allCompleted) return 'training_in_progress';
+    if (allCompleted) return 'active';
+
+    return 'training_required';
+}
+
+async function assignRequiredTrainingAndDocuments(caregiverId, { dueDays = 7, notify = true } = {}) {
+    if (!supabaseClient) return false;
+    try {
+        const caregiver = await getCaregiverById(caregiverId);
+        const modules = await getTrainingModules({ activeOnly: true });
+        const dueDate = new Date();
+        dueDate.setDate(dueDate.getDate() + dueDays);
+        const dueDateIso = dueDate.toISOString();
+
+        const assignmentsCreated = [];
+        for (const m of modules.filter(m => m.is_required)) {
+            const existing = await getTrainingAssignments({ caregiverId, moduleId: m.id });
+            if (existing && existing.length > 0) continue;
+            const a = await assignTrainingModule({
+                moduleId: m.id,
+                caregiverId,
+                dueDate: dueDateIso,
+                sendNotification: false
+            });
+            if (a) assignmentsCreated.push(a);
+        }
+
+        const requiredDocTypes = ['drivers_license','auto_insurance','background_check','w9','direct_deposit','signed_policies'];
+        for (const docType of requiredDocTypes) {
+            const existing = await getCaregiverDocuments(caregiverId, docType);
+            if (existing && existing.length > 0) continue;
+            await createCaregiverDocument({ caregiver_id: caregiverId, document_type: docType, file_url: 'pending-upload', status: 'pending' });
+        }
+
+        await refreshCaregiverActivation(caregiverId);
+
+        if (notify && assignmentsCreated.length > 0) {
+            await createNotification({
+                type: 'training_assigned_bulk',
+                title: 'Required Training Assigned',
+                message: `${assignmentsCreated.length} required training module(s) were assigned to ${caregiver?.name || 'a caregiver'}. Complete them by ${dueDate.toLocaleDateString()}.`,
+                caregiver_id: caregiverId,
+                recipient_role: 'caregiver',
+                priority: 'normal',
+                related_table: TABLES.CAREGIVER_TRAINING_ASSIGNMENTS,
+                related_record_id: assignmentsCreated[0]?.id
+            });
+        }
+
+        return true;
+    } catch (e) {
+        console.error('[CareHub] assignRequiredTrainingAndDocuments error:', e);
+        return false;
+    }
+}
+
+/**
+ * Backfill required training for a caregiver who was approved before automation existed.
+ * Safe to call multiple times; skips already-assigned modules.
+ */
+async function assignRequiredTrainingToCaregiver(caregiverId, { dueDays = 7, notify = true } = {}) {
+    return await assignRequiredTrainingAndDocuments(caregiverId, { dueDays, notify });
+}
+
+/**
+ * Check whether a caregiver has completed all required training and notify admin if so.
+ */
+async function notifyIfTrainingComplete(caregiverId) {
+    if (!supabaseClient) return;
+    try {
+        const caregiver = await getCaregiverById(caregiverId);
+        if (!caregiver) return;
+
+        const requiredModules = await supabaseClient
+            .from(TABLES.TRAINING_MODULES)
+            .select('id')
+            .eq('is_active', true)
+            .eq('is_required', true);
+        const requiredIds = new Set((requiredModules.data || []).map(m => m.id));
+        if (requiredIds.size === 0) return;
+
+        const assignments = await getTrainingAssignments({ caregiverId });
+        const requiredAssignments = assignments.filter(a => requiredIds.has(a.module_id));
+        const allCompleted = requiredAssignments.length > 0 && requiredAssignments.every(a => a.status === 'completed');
+        if (!allCompleted) return;
+
+        await createNotification({
+            type: 'training_complete',
+            title: 'Required Training Completed',
+            message: `${caregiver.name} has completed all required training and is ready for activation.`,
+            caregiver_id: caregiverId,
+            recipient_role: 'admin_owner',
+            priority: 'normal',
+            related_table: TABLES.CAREGIVERS,
+            related_record_id: caregiverId
+        });
+    } catch (e) {
+        console.error('[CareHub] notifyIfTrainingComplete error:', e);
+    }
+}
+
+/**
+ * Bulk backfill required training for all eligible caregivers (approved/onboarding/active without assignments).
+ */
+async function backfillRequiredTrainingForAllEligibleCaregivers({ dueDays = 7 } = {}) {
+    if (!supabaseClient) return { assigned: 0, errors: 0 };
+    try {
+        const caregivers = await getCaregivers({ status: 'onboarding' });
+        const activeCaregivers = await getCaregivers({ status: 'active' });
+        const all = [...caregivers, ...activeCaregivers];
+        const unique = all.filter((cg, idx, arr) => arr.findIndex(c => c.id === cg.id) === idx);
+
+        let assigned = 0, errors = 0;
+        for (const cg of unique) {
+            const ok = await assignRequiredTrainingAndDocuments(cg.id, { dueDays, notify: false });
+            if (ok) assigned++;
+            else errors++;
+        }
+
+        if (assigned > 0) {
+            await createNotification({
+                type: 'training_backfill_complete',
+                title: 'Training Backfill Complete',
+                message: `Required training was backfilled for ${assigned} eligible caregiver(s).`,
+                recipient_role: 'admin_owner',
+                priority: 'normal',
+                related_table: TABLES.CAREGIVERS,
+                related_record_id: null
+            });
+        }
+
+        return { assigned, errors };
+    } catch (e) {
+        console.error('[CareHub] backfillRequiredTrainingForAllEligibleCaregivers error:', e);
+        return { assigned: 0, errors: 1 };
+    }
+}
+
+/**
+ * Assign required training to all caregivers currently in training_required activation status.
+ */
+async function assignRequiredTrainingToAllEligibleCaregivers({ dueDays = 7 } = {}) {
+    if (!supabaseClient) return { assigned: 0, errors: 0 };
+    try {
+        const caregivers = await getCaregivers({ activation_status: 'training_required' });
+        let assigned = 0, errors = 0;
+        for (const cg of caregivers) {
+            const ok = await assignRequiredTrainingAndDocuments(cg.id, { dueDays, notify: true });
+            if (ok) assigned++;
+            else errors++;
+        }
+        return { assigned, errors };
+    } catch (e) {
+        console.error('[CareHub] assignRequiredTrainingToAllEligibleCaregivers error:', e);
+        return { assigned: 0, errors: 1 };
+    }
+}
+
 async function getOnboardingChecklist(caregiverId) {
     if (!supabaseClient) return null;
     const { data, error } = await supabaseClient.from(TABLES.ONBOARDING_CHECKLIST)
@@ -3848,6 +4723,26 @@ if (typeof module !== 'undefined' && module.exports) {
         createCaregiverResource,
         updateCaregiverResource,
         deleteCaregiverResource,
+        // Phase 2 Quiz, Documents, Certificates & Activation
+        getQuizQuestions,
+        getQuizAttemptHistory,
+        getQuizAttemptsForCaregiver,
+        submitQuizAttempt,
+        getNextQuizAttemptNumber,
+        getCaregiverDocuments,
+        getAllCaregiverDocuments,
+        createCaregiverDocument,
+        reviewCaregiverDocument,
+        deleteCaregiverDocument,
+        getCaregiverCertificates,
+        getCertificateById,
+        issueTrainingCertificate,
+        refreshCaregiverActivation,
+        getCaregiverActivationStatus,
+        isCaregiverEligibleForScheduling,
+        getEligibleCaregiversForScheduling,
+        getCaregiverActivationSummary,
+        assignRequiredTrainingAndDocuments,
         // Client-Caregiver Assignments
         getClientCaregiverAssignments,
         getAssignmentById,

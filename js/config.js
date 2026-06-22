@@ -8,7 +8,7 @@ window.DEBUG = false;
 // DEV_MODE = true  → demo/mock login buttons are visible; DEMO_USERS are accepted.
 // DEV_MODE = false → only real Supabase Auth is accepted; demo buttons are hidden.
 // IMPORTANT: Set to false before deploying to production.
-window.DEV_MODE = false;
+window.DEV_MODE = true;   // Enabled for role preview testing — disable before production
 
 window.CAREHUB_CONFIG = {
   SUPABASE_URL: "https://zyoozdgdiwopgwstiugu.supabase.co",
@@ -50,7 +50,14 @@ window.TABLES = {
   ONBOARDING_STEPS: "onboarding_steps",
   CAREGIVER_ONBOARDING_PROGRESS: "caregiver_onboarding_progress",
   ONBOARDING_CHECKLIST: "onboarding_checklist",
-  CAREGIVER_RESOURCES: "caregiver_resources"
+  CAREGIVER_RESOURCES: "caregiver_resources",
+  QUIZ_QUESTIONS: "quiz_questions",
+  QUIZ_ATTEMPTS: "quiz_attempts",
+  CAREGIVER_DOCUMENTS: "caregiver_documents",
+  CAREGIVER_CERTIFICATES: "caregiver_certificates",
+  CAREGIVER_FORM_TEMPLATES: "caregiver_form_templates",
+  CAREGIVER_FORM_ACKNOWLEDGEMENTS: "caregiver_form_acknowledgements",
+  CAREGIVER_ACTIVATION_REVIEWS: "caregiver_activation_reviews"
 };
 
 // =============================================================================
@@ -192,6 +199,16 @@ window.STATUS_CONFIG = {
   active:     { label: 'Active',     class: 'status-active',     icon: '●'  },
   inactive:   { label: 'Inactive',   class: 'status-inactive',   icon: '○'  },
 
+  // ── Phase 3 activation statuses ───────────────────────────────────────
+  application_approved: { label: 'Application Approved', class: 'status-application-approved', icon: '📝' },
+  training_required:    { label: 'Training Required',    class: 'status-training-required',   icon: '📚' },
+  training_in_progress: { label: 'Training In Progress', class: 'status-training-in-progress',  icon: '📖' },
+  documents_required:   { label: 'Documents Required',   class: 'status-documents-required',  icon: '📂' },
+  documents_pending_review:{ label: 'Pending Review',    class: 'status-documents-pending',   icon: '⏳' },
+  background_pending:   { label: 'Background Pending',   class: 'status-background-pending',  icon: '🔍' },
+  ready_for_final_review:{ label: 'Ready for Final Review', class: 'status-ready-for-review',  icon: '✅' },
+  training_overdue:     { label: 'Training Overdue',     class: 'status-training-overdue',     icon: '⏰' },
+
   // ── Caregiver portal account_status ──────────────────────────────────────
   approved_no_invite: { label: 'No Invite Sent', class: 'status-pending',    icon: '○'  },
   pending_invite:     { label: 'Invite Queued',  class: 'status-reviewing',  icon: '⏳' },
@@ -222,7 +239,7 @@ window.NAV_ITEMS = [
   { id: 'schedules', label: 'Schedules', icon: 'ph-calendar' },
   { id: 'timesheets', label: 'Timesheets', icon: 'ph-clock' },
   { id: 'visit-updates', label: 'Visit Updates', icon: 'ph-clipboard-text' },
-  { id: 'training-hub', label: 'Training Hub', icon: 'ph-graduation-cap' },
+  { id: 'training-hub', label: 'Onboarding', icon: 'ph-graduation-cap' },
   { id: 'notifications', label: 'Notifications', icon: 'ph-bell' },
   { id: 'settings', label: 'Settings', icon: 'ph-gear' }
 ];

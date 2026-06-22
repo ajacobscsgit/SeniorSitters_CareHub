@@ -1734,6 +1734,7 @@ async function renderCaregivers() {
             <button class="filter-tab" data-filter="onboarding">Onboarding</button>
             <button class="filter-tab" data-filter="active">Active</button>
             <button class="filter-tab" data-filter="inactive">Inactive</button>
+            <button class="filter-tab" data-filter="flagged">Flagged</button>
         </div>
         
         <div class="card">
@@ -1756,7 +1757,9 @@ async function renderCaregivers() {
 }
 
 async function loadCaregivers(filter = 'all') {
-    const filters = filter !== 'all' ? { status: filter } : {};
+    let filters = {};
+    if (filter === 'flagged') filters = { activation_status: 'flagged' };
+    else if (filter !== 'all') filters = { status: filter };
     let caregivers = await getCaregivers(filters);
 
     // Role filtering: caregivers see only themselves; families see their assigned caregivers
@@ -1796,7 +1799,8 @@ async function loadCaregivers(filter = 'all') {
                         <th>Email</th>
                         <th>Phone</th>
                         <th>City</th>
-                        <th>Onboarding Status</th>
+                        <th>Employment Status</th>
+                        <th>Training Status</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -1808,6 +1812,7 @@ async function loadCaregivers(filter = 'all') {
                             <td>${escapeHtml(cg.phone || 'N/A')}</td>
                             <td>${escapeHtml(cg.city || 'N/A')}</td>
                             <td>${renderStatusBadge(cg.status)}</td>
+                            <td>${renderStatusBadge(_mapActivationStatusToTrainingBadge(cg.activation_status))}</td>
                             <td class="actions">
                                 <button class="btn btn-sm btn-secondary" onclick="viewCaregiver('${cg.id}')">
                                     View
@@ -2935,8 +2940,8 @@ function formatDateForAPI(date) {
 // ==================== CREATE VISIT MODAL ====================
 
 async function openCreateScheduleModalForDate(dateStr) {
-    // Fetch active caregivers and clients for dropdowns
-    const caregivers = await getCaregivers({ status: 'active' });
+    // Fetch only fully active caregivers (training + documents + background check)
+    const caregivers = await getEligibleCaregiversForScheduling();
     const clients = await getClients({ status: 'active' });
 
     // Format the date for display using string parsing (no Date object to avoid timezone shift)
@@ -2991,6 +2996,10 @@ async function openCreateScheduleModalForDate(dateStr) {
                             <option value="">Select a caregiver...</option>
                             ${caregivers.map(cg => `<option value="${cg.id}">${escapeHtml(cg.name)}</option>`).join('')}
                         </select>
+                        <div style="font-size:12px;color:#6b7280;margin-top:4px;">
+                            <i class="ph ph-info"></i> Only caregivers with <strong>Active</strong> training status can be scheduled.
+                        </div>
+                        ${caregivers.length === 0 ? `<div style="font-size:12px;color:#dc2626;margin-top:4px;"><i class="ph ph-warning"></i> No active caregivers available. Complete training, documents, and background checks first.</div>` : ''}
                     </div>
                     <div class="form-group">
                         <label for="schedule-client_id">Client</label>
@@ -3328,7 +3337,15 @@ async function approveApplication(id) {
         return;
     }
 
-    // ── Step 2: Ask whether to send the portal invite now ────────────────────
+    // ── Step 2: Auto-create onboarding placeholders (training, docs, forms) ───
+    const placeholdersCreated = await createOnboardingPlaceholders(caregiver.id, { dueDays: 7 });
+    if (placeholdersCreated) {
+        CareHubToast.info(`Required onboarding placeholders created for ${caregiver.name}.`);
+    } else {
+        console.warn('[CareHub] Onboarding placeholders could not be created for', caregiver.id);
+    }
+
+    // ── Step 3: Ask whether to send the portal invite now ────────────────────
     const sendNow = await CareHubConfirm.confirm({
         title:       'Send Portal Invite?',
         message:     `Caregiver profile created for ${caregiver.name}.\n\nSend a portal invite to ${caregiver.email} now so they can set up their account?`,
@@ -4109,12 +4126,16 @@ function _renderCaregiverOverviewTab(cg) {
                     <div class="detail-value">${renderStatusBadge(cg.status)}</div>
                 </div>
                 <div class="detail-item">
+                    <div class="detail-label">Training Status</div>
+                    <div class="detail-value"><span id="trainingBadge-${cg.id}"><span class="status-badge status-${cg.activation_status === 'active' ? 'active' : 'training-required'}">${cg.activation_status === 'active' ? 'Active' : 'Training Required'}</span></span></div>
+                </div>
+                <div class="detail-item">
                     <div class="detail-label">Background Check</div>
                     <div class="detail-value">${renderStatusBadge(cg.background_check_status || 'pending')}</div>
                 </div>
                 <div class="detail-item">
-                    <div class="detail-label">Training</div>
-                    <div class="detail-value"><span id="trainingBadge-${cg.id}">${renderStatusBadge(cg.training_status || 'pending')}</span></div>
+                    <div class="detail-label">Documents</div>
+                    <div class="detail-value">${renderStatusBadge(cg.documents_status || 'pending')}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">Account</div>
@@ -4139,6 +4160,31 @@ async function switchCaregiverProfileTab(tab, caregiverId) {
     });
 
     await _loadCaregiverProfileTab(caregiverId, isAdmin);
+}
+
+/**
+ * Map a caregiver's activation_status to the Phase 3 training badge shown in tables.
+ */
+function _mapActivationStatusToTrainingBadge(activationStatus) {
+    switch (activationStatus) {
+        case 'active': return 'active';
+        case 'training_required': return 'training_required';
+        case 'training_complete':
+        case 'documents_required': return 'training_in_progress';
+        case 'flagged': return 'training_overdue';
+        default: return 'training_required';
+    }
+}
+
+/**
+ * Update the Phase 3 training badge shown on the caregiver profile overview.
+ */
+async function updateCaregiverTrainingBadge(caregiverId) {
+    const badge = await getCaregiverTrainingBadge(caregiverId);
+    const el = document.getElementById(`trainingBadge-${caregiverId}`);
+    if (el) {
+        el.innerHTML = renderStatusBadge(badge);
+    }
 }
 
 async function _loadCaregiverProfileTab(caregiverId, isAdmin) {
@@ -4172,7 +4218,7 @@ async function _loadCaregiverProfileTab(caregiverId, isAdmin) {
             container.innerHTML = await _renderCaregiverTimeOffTab(caregiver, isAdmin);
             break;
         case 'documents':
-            container.innerHTML = _renderCaregiverDocumentsTab(caregiver, isAdmin);
+            container.innerHTML = await _renderCaregiverDocumentsTab(caregiver, isAdmin);
             break;
         case 'notes':
             container.innerHTML = _renderCaregiverNotesTab(caregiver, isAdmin);
@@ -4365,15 +4411,50 @@ async function _renderCaregiverOnboardingTab(caregiver, isAdmin) {
     return html;
 }
 
-function _renderCaregiverDocumentsTab(caregiver, isAdmin) {
+async function _renderCaregiverDocumentsTab(caregiver, isAdmin) {
+    const docs = await getCaregiverDocuments(caregiver.id);
+    const DOC_LABELS = {
+        drivers_license: "Driver's License",
+        auto_insurance: 'Auto Insurance',
+        background_check: 'Background Check',
+        w9: 'W9',
+        direct_deposit: 'Direct Deposit Form',
+        signed_policies: 'Signed Policies'
+    };
+    const requiredDocTypes = ['drivers_license','auto_insurance','background_check','w9','direct_deposit','signed_policies'];
+    const docMap = {};
+    requiredDocTypes.forEach(t => { docMap[t] = { type: t, label: DOC_LABELS[t], status: 'missing', file_url: '', id: null, admin_notes: '' }; });
+    docs.forEach(d => { if (docMap[d.document_type]) Object.assign(docMap[d.document_type], d); });
+
+    const approvedCount = docs.filter(d => d.status === 'approved').length;
+    const totalCount = requiredDocTypes.length;
+
+    const items = Object.values(docMap).map(d => {
+        const statusColor = { missing:'#9ca3af', pending:'#d97706', approved:'#16a34a', rejected:'#dc2626', expired:'#7c3aed' };
+        return `
+        <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;background:#fff;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div>
+                    <div style="font-weight:600;">${d.label}</div>
+                    <div style="font-size:13px;color:${statusColor[d.status]||'#9ca3af'};"><i class="ph ph-circle" style="font-size:10px;margin-right:4px;"></i>${d.status === 'missing' ? 'Not uploaded' : d.status}</div>
+                </div>
+                <div style="display:flex;gap:6px;">
+                    ${d.status !== 'missing' && d.file_url && d.file_url !== 'pending-upload' ? `<a href="${escapeHtml(d.file_url)}" target="_blank" class="btn btn-sm btn-secondary"><i class="ph ph-eye"></i> View</a>` : ''}
+                    ${isAdmin && d.status !== 'missing' ? `
+                        <button class="btn btn-sm btn-success" onclick="reviewDocumentUI('${d.id}','approved')"><i class="ph ph-check"></i></button>
+                        <button class="btn btn-sm btn-danger" onclick="openDocumentReviewModal('${d.id}','rejected')"><i class="ph ph-x"></i></button>
+                    ` : ''}
+                </div>
+            </div>
+            ${d.admin_notes ? `<div style="margin-top:8px;font-size:12px;color:#dc2626;background:#fef2f2;padding:6px 8px;border-radius:6px;"><strong>Admin note:</strong> ${escapeHtml(d.admin_notes)}</div>` : ''}
+        </div>`;
+    }).join('');
+
     return `
         <div class="detail-section">
-            <h4><i class="ph ph-files"></i> Documents</h4>
+            <h4><i class="ph ph-files"></i> Documents (${approvedCount}/${totalCount} approved)</h4>
             <div style="display:flex;flex-direction:column;gap:12px;">
-                <div style="border:1px dashed #d1d5db;border-radius:8px;padding:24px;text-align:center;">
-                    <i class="ph ph-upload" style="font-size:32px;color:#9ca3af;margin-bottom:8px;"></i>
-                    <p style="color:#6b7280;margin:0;">Document upload feature coming soon</p>
-                </div>
+                ${items}
             </div>
         </div>
     `;
@@ -5740,8 +5821,8 @@ async function saveClientSchedulePrefsForm() {
 // ==================== SCHEDULE MODAL FUNCTIONS ====================
 
 async function openCreateScheduleModal() {
-    // Fetch active caregivers and clients for dropdowns
-    const caregivers = await getCaregivers({ status: 'active' });
+    // Fetch only fully active caregivers (training + documents + background check)
+    const caregivers = await getEligibleCaregiversForScheduling();
     const clients = await getClients({ status: 'active' });
 
     modalTitle.textContent = 'Schedule New Visit';
@@ -5780,6 +5861,10 @@ async function openCreateScheduleModal() {
                             <option value="">Select a caregiver...</option>
                             ${caregivers.map(cg => `<option value="${cg.id}">${escapeHtml(cg.name)}</option>`).join('')}
                         </select>
+                        <div style="font-size:12px;color:#6b7280;margin-top:4px;">
+                            <i class="ph ph-info"></i> Only caregivers with <strong>Active</strong> training status can be scheduled.
+                        </div>
+                        ${caregivers.length === 0 ? `<div style="font-size:12px;color:#dc2626;margin-top:4px;"><i class="ph ph-warning"></i> No active caregivers available. Complete training, documents, and background checks first.</div>` : ''}
                     </div>
                     <div class="form-group">
                         <label for="schedule-client_id">Client</label>
@@ -5825,8 +5910,15 @@ async function openEditScheduleModal(id) {
 
     const schedule = currentData;
 
-    // Fetch active caregivers and clients for dropdowns
-    const caregivers = await getCaregivers({ status: 'active' });
+    // Fetch only fully active caregivers; preserve current caregiver if now ineligible
+    const eligible = await getEligibleCaregiversForScheduling();
+    const eligibleIds = new Set(eligible.map(cg => cg.id));
+    const allCaregivers = await getCaregivers({ status: 'active' });
+    const currentCaregiver = allCaregivers.find(cg => cg.id === schedule.caregiver_id);
+    const caregivers = currentCaregiver && !eligibleIds.has(currentCaregiver.id)
+        ? [currentCaregiver, ...eligible]
+        : eligible;
+
     const clients = await getClients({ status: 'active' });
 
     modalTitle.textContent = 'Edit Visit';
@@ -5864,8 +5956,9 @@ async function openEditScheduleModal(id) {
                         <label for="schedule-caregiver_id">Caregiver</label>
                         <select id="schedule-caregiver_id" name="caregiver_id" class="form-select" required>
                             <option value="">Select a caregiver...</option>
-                            ${caregivers.map(cg => `<option value="${cg.id}" ${cg.id === schedule.caregiver_id ? 'selected' : ''}>${escapeHtml(cg.name)}</option>`).join('')}
+                            ${caregivers.map(cg => `<option value="${cg.id}" ${cg.id === schedule.caregiver_id ? 'selected' : ''}${!eligibleIds.has(cg.id) ? ' style="color:#dc2626;"' : ''}>${escapeHtml(cg.name)}${!eligibleIds.has(cg.id) ? ' (not eligible)' : ''}</option>`).join('')}
                         </select>
+                        ${currentCaregiver && !eligibleIds.has(currentCaregiver.id) ? `<div style="font-size:12px;color:#dc2626;margin-top:4px;"><i class="ph ph-warning"></i> This caregiver is no longer eligible due to incomplete training, documents, or background check.</div>` : ''}
                     </div>
                     <div class="form-group">
                         <label for="schedule-client_id">Client</label>
@@ -5917,6 +6010,13 @@ async function saveSchedule(id = null) {
     // Validation
     if (!scheduleData.date || !scheduleData.start_time || !scheduleData.end_time || !scheduleData.caregiver_id || !scheduleData.client_id) {
         CareHubToast.error('Please fill in all required fields (Date, Time, Caregiver, Client)');
+        return;
+    }
+
+    // Phase 3: confirm caregiver is active before scheduling
+    const eligible = await isCaregiverEligibleForScheduling(scheduleData.caregiver_id);
+    if (!eligible) {
+        CareHubToast.error('This caregiver is not active. Only caregivers who have completed training, documents, and background check can be scheduled.');
         return;
     }
 
@@ -7561,27 +7661,57 @@ window.saveCaregiverAvailabilityForm = saveCaregiverAvailabilityForm;
 window.openClientSchedulePrefsModal = openClientSchedulePrefsModal;
 window.saveClientSchedulePrefsForm = saveClientSchedulePrefsForm;
 window.toggleRecurringFields = toggleRecurringFields;
-// ==================== TRAINING HUB ====================
+// ==================== CAREGIVER ONBOARDING ====================
 
-let _trainingTab = 'training'; // 'training' | 'onboarding' | 'resources' | 'emergency'
+let _trainingTab = 'overview'; // default for caregivers
+let _adminTrainingTab = 'overview'; // default for admins
+
+function _getTrainingTabState(isAdmin) {
+    return isAdmin ? _adminTrainingTab : _trainingTab;
+}
+
+function _setTrainingTabState(isAdmin, tab) {
+    if (isAdmin) _adminTrainingTab = tab;
+    else _trainingTab = tab;
+}
+
+const CAREGIVER_TABS = ['overview','training','documents','resources'];
+const ADMIN_TABS = ['overview','caregivers','training','documents','resources','settings'];
+
+function _isValidTrainingTab(tab, isAdmin) {
+    return isAdmin ? ADMIN_TABS.includes(tab) : CAREGIVER_TABS.includes(tab);
+}
 
 async function renderTrainingHub() {
     const role = typeof getCurrentRole === 'function' ? getCurrentRole() : 'admin_owner';
     const isAdmin = role === 'admin_owner' || role === 'co_owner';
+    const title = isAdmin ? 'Caregiver Onboarding' : 'My Onboarding';
+    const icon = isAdmin ? 'ph ph-clipboard-text' : 'ph ph-graduation-cap';
+
+    const tabs = isAdmin ? ADMIN_TABS : CAREGIVER_TABS;
+    const tabLabels = {
+        overview:   { icon: 'ph ph-house', label: 'Overview' },
+        training:   { icon: 'ph ph-books', label: 'Training' },
+        documents:  { icon: 'ph ph-files', label: 'Documents & Signatures' },
+        caregivers: { icon: 'ph ph-users', label: 'Caregiver Progress' },
+        resources:  { icon: 'ph ph-folder-open', label: 'Resources' },
+        settings:   { icon: 'ph ph-gear', label: 'Settings' }
+    };
+
+    const currentTab = _getTrainingTabState(isAdmin);
+
+    let tabHtml = `<div class="tab-nav" style="margin-bottom:var(--spacing-md);flex-wrap:wrap;">`;
+    for (const t of tabs) {
+        const { icon: i, label } = tabLabels[t];
+        tabHtml += `<button class="tab-btn ${currentTab===t?'active':''}" onclick="switchTrainingTab('${t}')"><i class="ph ${i}"></i> ${label}</button>`;
+    }
+    tabHtml += `</div>`;
 
     mainContent.innerHTML = `
         <div class="page-header animate-fade-in">
-            <h1><i class="ph ph-graduation-cap" style="margin-right:8px;"></i>Training Hub</h1>
-            ${isAdmin ? `<button class="btn btn-primary btn-sm" onclick="openAddTrainingModuleModal()"><i class="ph ph-plus"></i> Add Training</button>` : ''}
+            <h1><i class="${icon}" style="margin-right:8px;"></i>${title}</h1>
         </div>
-
-        <div class="tab-nav" style="margin-bottom:var(--spacing-md);">
-            <button class="tab-btn ${_trainingTab==='training'?'active':''}" onclick="switchTrainingTab('training')"><i class="ph ph-books"></i> Training</button>
-            <button class="tab-btn ${_trainingTab==='onboarding'?'active':''}" onclick="switchTrainingTab('onboarding')"><i class="ph ph-clipboard-text"></i> Onboarding</button>
-            <button class="tab-btn ${_trainingTab==='resources'?'active':''}" onclick="switchTrainingTab('resources')"><i class="ph ph-folder-open"></i> Resources</button>
-            <button class="tab-btn ${_trainingTab==='emergency'?'active':''}" onclick="switchTrainingTab('emergency')"><i class="ph ph-warning-octagon"></i> Emergency</button>
-        </div>
-
+        ${tabHtml}
         <div id="training-hub-content">
             <div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>
         </div>`;
@@ -7590,33 +7720,202 @@ async function renderTrainingHub() {
 }
 
 async function switchTrainingTab(tab) {
-    _trainingTab = tab;
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(b => { if (b.textContent.toLowerCase().includes(tab === 'training' ? 'training' : tab === 'onboarding' ? 'onboard' : tab === 'resources' ? 'resource' : 'emergency')) b.classList.add('active'); });
     const role = typeof getCurrentRole === 'function' ? getCurrentRole() : 'admin_owner';
     const isAdmin = role === 'admin_owner' || role === 'co_owner';
-    await _loadTrainingTabContent(role, isAdmin);
+    if (!_isValidTrainingTab(tab, isAdmin)) tab = isAdmin ? 'overview' : 'overview';
+    _setTrainingTabState(isAdmin, tab);
+    await renderTrainingHub();
 }
 
 async function _loadTrainingTabContent(role, isAdmin) {
     const c = document.getElementById('training-hub-content');
     if (!c) return;
     c.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>';
+    const tab = _getTrainingTabState(isAdmin);
 
-    if (_trainingTab === 'training')   await _renderTrainingTab(c, role, isAdmin);
-    if (_trainingTab === 'onboarding') await _renderOnboardingTab(c, role, isAdmin);
-    if (_trainingTab === 'resources')  await _renderResourcesTab(c, isAdmin);
-    if (_trainingTab === 'emergency')  await _renderEmergencyTab(c, isAdmin);
+    if (tab === 'overview') {
+        isAdmin ? await _renderAdminOverviewTab(c, isAdmin) : await _renderCaregiverOverviewTab(c, role, isAdmin);
+    }
+    if (tab === 'training') {
+        isAdmin ? await _renderAdminTrainingLibraryTab(c, isAdmin) : await _renderTrainingTab(c, role, isAdmin);
+    }
+    if (tab === 'documents') {
+        isAdmin ? await _renderAdminDocumentsSignaturesTab(c, isAdmin) : await _renderDocumentsTab(c, role, isAdmin);
+    }
+    if (tab === 'resources') {
+        await _renderResourcesTab(c, isAdmin);
+    }
+    if (tab === 'caregivers') {
+        await _renderAdminCaregiverProgressTab(c, isAdmin);
+    }
+    if (tab === 'settings') {
+        await _renderAdminSettingsTab(c, isAdmin);
+    }
+}
+
+async function assignRequiredTrainingToAllEligibleUI() {
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Assign Required Training',
+        message: 'This will assign all required active modules to every caregiver whose activation status is "Training Required". Existing assignments will not be duplicated.',
+        confirmText: 'Assign Training',
+        cancelText: 'Cancel',
+        icon: 'ph-users-three',
+        iconColor: '#3B82F6'
+    });
+    if (!confirmed) return;
+
+    const result = await assignRequiredTrainingToAllEligibleCaregivers();
+    if (result.assigned > 0) {
+        CareHubToast.success(`Assigned required training to ${result.assigned} caregiver(s).`);
+    } else if (result.errors === 0) {
+        CareHubToast.info('No eligible caregivers needed training assignments.');
+    }
+    if (result.errors > 0) {
+        CareHubToast.warning(`Training assignment failed for ${result.errors} caregiver(s).`);
+    }
+    await _loadTrainingTabContent(getCurrentRole(), true);
+}
+
+async function backfillRequiredTrainingUI() {
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Backfill Existing Caregivers',
+        message: 'This will assign any missing required modules to all onboarding and active caregivers. Safe to run multiple times.',
+        confirmText: 'Backfill',
+        cancelText: 'Cancel',
+        icon: 'ph-arrows-clockwise',
+        iconColor: '#6366F1'
+    });
+    if (!confirmed) return;
+
+    const result = await backfillRequiredTrainingForAllEligibleCaregivers();
+    if (result.assigned > 0) {
+        CareHubToast.success(`Backfilled required training for ${result.assigned} caregiver(s).`);
+    } else if (result.errors === 0) {
+        CareHubToast.info('No caregivers were missing training assignments.');
+    }
+    if (result.errors > 0) {
+        CareHubToast.warning(`Backfill failed for ${result.errors} caregiver(s).`);
+    }
+    await _loadTrainingTabContent(getCurrentRole(), true);
+}
+
+// ── Caregiver Overview Tab ───────────────────────────────────────────────────
+
+async function _renderCaregiverOverviewTab(c, role, isAdmin) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) {
+        c.innerHTML = '<div class="empty-state"><i class="ph ph-user-circle" style="font-size:48px;color:#9ca3af;display:block;margin-bottom:12px;"></i><h3>No caregiver profile linked</h3><p>Contact your supervisor to link your account.</p></div>';
+        return;
+    }
+
+    const summary = await getCaregiverOnboardingSummary(caregiverId);
+    if (!summary) {
+        c.innerHTML = '<div class="empty-state"><h3>Unable to load onboarding summary.</h3></div>';
+        return;
+    }
+
+    const statusConfig = (window.STATUS_CONFIG && window.STATUS_CONFIG[summary.activationStatus]) || {
+        label: summary.activationStatus.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+        color: '#6b7280',
+        bg: '#f3f4f6'
+    };
+
+    const STATUS_ICON = {
+        training_required: 'ph ph-books',
+        training_in_progress: 'ph ph-spinner',
+        documents_required: 'ph ph-files',
+        documents_pending_review: 'ph ph-hourglass',
+        background_pending: 'ph ph-fingerprint',
+        ready_for_final_review: 'ph ph-check-circle',
+        active: 'ph ph-seal-check',
+        rejected: 'ph ph-x-circle',
+        inactive: 'ph ph-pause-circle'
+    };
+
+    const stepState = (step) => {
+        if (step.complete) return { icon: 'ph-check-circle', color: '#16a34a', label: 'Complete' };
+        if (step.blocked) return { icon: 'ph-warning-circle', color: '#dc2626', label: 'Blocked' };
+        if (step.pending) return { icon: 'ph-hourglass', color: '#d97706', label: 'Pending' };
+        if (step.inProgress) return { icon: 'ph-spinner', color: '#3b82f6', label: 'In Progress' };
+        if (step.overdue) return { icon: 'ph-warning', color: '#dc2626', label: 'Overdue' };
+        return { icon: 'ph-circle', color: '#d1d5db', label: 'Not started' };
+    };
+
+    const stepsHtml = summary.steps.map((s, idx) => {
+        const st = stepState(s);
+        return `
+        <div class="co-step-row">
+            <div class="co-step-icon" style="color:${st.color};"><i class="ph ${st.icon}"></i></div>
+            <div class="co-step-body">
+                <div class="co-step-title">${idx + 1}. ${s.label}</div>
+                <div class="co-step-meta" style="color:${st.color};">${st.label}</div>
+            </div>
+        </div>`;
+    }).join('');
+
+    const dueDate = summary.training.items.find(a => a.due_date && a.status !== 'completed')?.due_date;
+    const overdueWarning = summary.training.overdue > 0
+        ? `<div class="co-alert co-alert-danger"><i class="ph ph-warning"></i> You have ${summary.training.overdue} overdue training item(s). Complete them as soon as possible.</div>`
+        : '';
+
+    c.innerHTML = `
+        <div class="co-overview">
+            <div class="co-welcome-card">
+                <div>
+                    <div class="co-welcome-title">Welcome, ${escapeHtml(summary.caregiver.name || 'Caregiver')}</div>
+                    <div class="co-welcome-sub">Here is everything you need to complete before you can start working with clients.</div>
+                </div>
+                <div class="co-status-badge" style="background:${statusConfig.bg};color:${statusConfig.color};">
+                    <i class="ph ${STATUS_ICON[summary.activationStatus] || 'ph-circle'}"></i>
+                    ${statusConfig.label}
+                </div>
+            </div>
+
+            <div class="co-progress-card">
+                <div class="co-progress-header">
+                    <div class="co-progress-title">Onboarding Progress</div>
+                    <div class="co-progress-value">${summary.percentage}%</div>
+                </div>
+                <div class="co-progress-bar"><div class="co-progress-fill" style="width:${summary.percentage}%;"></div></div>
+                <div class="co-progress-meta">${summary.steps.filter(s => s.complete).length} of ${summary.steps.length} steps complete</div>
+            </div>
+
+            ${overdueWarning}
+
+            <div class="co-section-card">
+                <div class="co-section-title">Required Steps</div>
+                ${stepsHtml}
+            </div>
+
+            <div class="co-next-card">
+                <div class="co-next-label">Next Step</div>
+                <div class="co-next-title">${summary.nextStep.label}</div>
+                ${dueDate ? `<div class="co-next-due"><i class="ph ph-clock"></i> Due ${new Date(dueDate).toLocaleDateString()}</div>` : ''}
+            </div>
+
+            <div class="co-emergency-card">
+                <div class="co-emergency-title"><i class="ph ph-warning-octagon"></i> Emergency Reminder</div>
+                <div class="co-emergency-body">
+                    For any life-threatening emergency, <strong>call 911 first</strong>. Then notify SeniorSitters management.
+                    Emergency contacts are in the <a href="javascript:switchTrainingTab('resources')">Resources</a> tab.
+                </div>
+            </div>
+        </div>
+    `;
 }
 
 // ── Training Tab ─────────────────────────────────────────────────────────────
 
 async function _renderTrainingTab(c, role, isAdmin) {
     const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) {
+        c.innerHTML = '<div class="empty-state"><i class="ph ph-user-circle" style="font-size:48px;color:#9ca3af;display:block;margin-bottom:12px;"></i><h3>No caregiver profile linked</h3><p>Contact your supervisor to link your account.</p></div>';
+        return;
+    }
 
     const [modules, assignments] = await Promise.all([
-        getTrainingModules({ activeOnly: !isAdmin }),
-        getTrainingAssignments(isAdmin ? {} : { caregiverId })
+        getTrainingModules({ activeOnly: true }),
+        getTrainingAssignments({ caregiverId })
     ]);
 
     const assignMap = {};
@@ -7625,56 +7924,78 @@ async function _renderTrainingTab(c, role, isAdmin) {
         assignMap[key] = a;
     });
 
-    const STATUS_COLOR = { assigned:'#d97706', in_progress:'#3b82f6', completed:'#16a34a', overdue:'#dc2626', waived:'#9ca3af' };
+    const STATUS_LABEL = {
+        not_started: 'Not Started',
+        in_progress: 'In Progress',
+        completed: 'Complete',
+        overdue: 'Overdue',
+        assigned: 'Assigned'
+    };
+    const STATUS_COLOR = {
+        not_started:'#9ca3af',
+        in_progress:'#3b82f6',
+        completed:'#16a34a',
+        overdue:'#dc2626',
+        assigned:'#d97706'
+    };
+    const ACTION_LABEL = {
+        not_started: 'Start',
+        in_progress: 'Continue',
+        completed: 'Review',
+        overdue: 'Start',
+        assigned: 'Start'
+    };
 
     if (modules.length === 0) {
-        c.innerHTML = `<div class="empty-state"><div class="empty-state-icon"><i class="ph ph-books"></i></div><h3>No training modules yet</h3>${isAdmin ? '<p><button class="btn btn-primary" onclick="openAddTrainingModuleModal()"><i class="ph ph-plus"></i> Add Module</button></p>' : '<p>No training has been assigned yet.</p>'}</div>`;
+        c.innerHTML = `<div class="empty-state"><div class="empty-state-icon"><i class="ph ph-books"></i></div><h3>No training assigned</h3><p>Your supervisor will assign training modules here.</p></div>`;
         return;
     }
 
     const CATEGORY_ICON = { onboarding:'ph-clipboard', safety:'ph-shield-check', clinical:'ph-stethoscope', compliance:'ph-scales', soft_skills:'ph-chat-circle', policy:'ph-file-text', general:'ph-books' };
-    const TYPE_ICON = { document:'ph-file-text', video:'ph-video', link:'ph-link', quiz:'ph-question', photo_guide:'ph-images' };
+    const TYPE_ICON = { document:'ph-file-text', video:'ph-video', link:'ph-link', quiz:'ph-question', photo_guide:'ph-images', acknowledgement:'ph-check', mixed:'ph-stack' };
 
     const cards = modules.map(m => {
-        const aKey = caregiverId ? `${m.id}__${caregiverId}` : null;
-        const a    = aKey ? assignMap[aKey] : null;
-        const statusHtml = a
-            ? `<span class="th-status-dot" style="background:${STATUS_COLOR[a.status]||'#9ca3af'};"></span><span style="font-size:12px;color:${STATUS_COLOR[a.status]||'#9ca3af'};">${a.status.replace('_',' ')}</span>`
-            : isAdmin ? '' : `<span style="font-size:12px;color:#9ca3af;">not assigned</span>`;
+        const aKey = `${m.id}__${caregiverId}`;
+        const a = assignMap[aKey];
+        const status = a?.status || 'not_started';
+        const isOverdue = status !== 'completed' && a?.due_date && new Date(a.due_date) < new Date();
+        const displayStatus = isOverdue ? 'overdue' : status;
+        const dueText = a?.due_date ? `Due ${new Date(a.due_date).toLocaleDateString()}` : '';
 
-        const dueHtml = a?.due_date ? `<span style="font-size:11px;color:#9ca3af;margin-left:8px;">Due ${a.due_date}</span>` : '';
-
-        const actionBtns = isAdmin
-            ? `<div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;">
-                <button class="btn btn-sm btn-secondary" onclick="openAssignModuleModal('${m.id}','${escapeHtml(m.title)}')"><i class="ph ph-user-plus"></i> Assign</button>
-                <button class="btn btn-sm btn-secondary" onclick="openEditTrainingModuleModal('${m.id}')"><i class="ph ph-pencil"></i> Edit</button>
-                <button class="btn btn-sm btn-danger" onclick="deleteTrainingModuleUI('${m.id}')"><i class="ph ph-trash"></i></button>
-               </div>`
-            : a && a.status !== 'completed'
-                ? `<div style="margin-top:10px;display:flex;gap:6px;">
-                    ${m.requires_acknowledgement
-                        ? `<button class="btn btn-sm btn-primary" onclick="acknowledgeTrainingUI('${a.id}')"><i class="ph ph-check"></i> Acknowledge & Complete</button>`
-                        : `<button class="btn btn-sm btn-success" onclick="markTrainingCompleteUI('${a.id}')"><i class="ph ph-check-circle"></i> Mark Complete</button>`}
-                   </div>`
-                : a?.status === 'completed' ? `<div style="margin-top:10px;"><span style="color:#16a34a;font-size:13px;"><i class="ph ph-seal-check"></i> Completed ${a.completed_at ? new Date(a.completed_at).toLocaleDateString() : ''}</span></div>` : '';
+        let actionBtn = '';
+        if (status === 'completed') {
+            actionBtn = `<button class="btn btn-sm btn-secondary" onclick="openTrainingModuleDetail('${a.id}','${m.id}')"><i class="ph ph-eye"></i> Review</button>`;
+        } else if (m.content_type === 'quiz') {
+            actionBtn = `<button class="btn btn-sm btn-primary" onclick="openTrainingModuleDetail('${a?.id || ''}','${m.id}')"><i class="ph ph-question"></i> ${ACTION_LABEL[displayStatus]}</button>`;
+        } else if (m.requires_acknowledgement || m.content_type === 'acknowledgement') {
+            actionBtn = `<button class="btn btn-sm btn-primary" onclick="openTrainingModuleDetail('${a?.id || ''}','${m.id}')"><i class="ph ph-check"></i> ${ACTION_LABEL[displayStatus]}</button>`;
+        } else {
+            actionBtn = `<button class="btn btn-sm btn-primary" onclick="openTrainingModuleDetail('${a?.id || ''}','${m.id}')"><i class="ph ph-play"></i> ${ACTION_LABEL[displayStatus]}</button>`;
+        }
 
         return `
         <div class="th-module-card ${m.is_required ? 'th-required' : ''}">
-            <div style="display:flex;gap:12px;align-items:flex-start;">
+            <div class="th-module-card-main">
                 <div class="th-module-icon"><i class="ph ${CATEGORY_ICON[m.category]||'ph-books'}"></i></div>
                 <div style="flex:1;min-width:0;">
-                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                        <strong style="font-size:14px;">${escapeHtml(m.title)}</strong>
-                        ${m.is_required ? '<span class="th-badge th-badge-required">Required</span>' : ''}
-                        <span class="th-badge" style="background:#f3f4f6;color:#374151;">${m.category}</span>
-                        <i class="ph ${TYPE_ICON[m.content_type]||'ph-file'}" title="${m.content_type}" style="color:#9ca3af;font-size:14px;"></i>
+                    <div class="th-module-title-row">
+                        <strong>${escapeHtml(m.title)}</strong>
+                        ${m.is_required ? '<span class="th-badge th-badge-required">Required</span>' : '<span class="th-badge">Optional</span>'}
                     </div>
-                    ${m.description ? `<div style="font-size:13px;color:#6b7280;margin-top:4px;">${escapeHtml(m.description)}</div>` : ''}
-                    ${m.duration_minutes ? `<div style="font-size:12px;color:#9ca3af;margin-top:2px;"><i class="ph ph-clock"></i> ${m.duration_minutes} min</div>` : ''}
-                    <div style="display:flex;align-items:center;margin-top:6px;">${statusHtml}${dueHtml}</div>
-                    ${m.content_url ? `<a href="${escapeHtml(m.content_url)}" target="_blank" rel="noopener" class="btn btn-sm btn-secondary" style="margin-top:8px;display:inline-flex;gap:4px;"><i class="ph ph-arrow-square-out"></i> Open</a>` : ''}
-                    ${m.content_body ? `<div class="th-content-body">${escapeHtml(m.content_body)}</div>` : ''}
-                    ${actionBtns}
+                    <div class="th-module-meta">
+                        <span class="th-badge" style="background:#f3f4f6;color:#374151;">${m.category}</span>
+                        ${m.duration_minutes ? `<span><i class="ph ph-clock"></i> ${m.duration_minutes} min</span>` : ''}
+                        <i class="ph ${TYPE_ICON[m.content_type]||'ph-file'}" title="${m.content_type}"></i>
+                    </div>
+                    <div class="th-module-status" style="color:${STATUS_COLOR[displayStatus]};">
+                        <span class="th-status-dot" style="background:${STATUS_COLOR[displayStatus]};"></span>
+                        ${STATUS_LABEL[displayStatus]}
+                        ${isOverdue ? `<span style="color:#dc2626;margin-left:8px;font-weight:600;"><i class="ph ph-warning"></i> OVERDUE</span>` : ''}
+                        ${dueText ? `<span style="color:#9ca3af;margin-left:8px;">${dueText}</span>` : ''}
+                    </div>
+                    <div class="th-module-actions">
+                        ${actionBtn}
+                    </div>
                 </div>
             </div>
         </div>`;
@@ -7880,6 +8201,1035 @@ async function _renderEmergencyTab(c, isAdmin) {
         </div>`;
 }
 
+// ── Documents Tab ────────────────────────────────────────────────────────────
+
+async function _renderDocumentsTab(c, role, isAdmin) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { c.innerHTML = '<div class="empty-state"><h3>No caregiver profile linked.</h3></div>'; return; }
+
+    const DOC_LABELS = {
+        drivers_license: "Driver's License",
+        auto_insurance: 'Auto Insurance',
+        vehicle_registration: 'Vehicle Registration',
+        background_check_authorization: 'Background Check Authorization',
+        w9: 'W9',
+        direct_deposit: 'Direct Deposit Form',
+        cpr_first_aid_certificate: 'CPR / First Aid Certificate',
+        signed_policies: 'Signed Policies'
+    };
+    const OPTIONAL_DOCS = ['vehicle_registration', 'cpr_first_aid_certificate'];
+
+    const [docs, templates, acknowledgements] = await Promise.all([
+        getCaregiverDocuments(caregiverId),
+        getCaregiverFormTemplates({ activeOnly: true, requiredOnly: true }),
+        getCaregiverFormAcknowledgements(caregiverId)
+    ]);
+
+    const requiredDocTypes = ['drivers_license','auto_insurance','w9','direct_deposit','background_check_authorization'];
+    const docMap = {};
+    requiredDocTypes.forEach(t => { docMap[t] = { type: t, label: DOC_LABELS[t], status: 'missing', file_url: '', id: null, required: true }; });
+    OPTIONAL_DOCS.forEach(t => { docMap[t] = { type: t, label: DOC_LABELS[t], status: 'missing', file_url: '', id: null, required: false }; });
+    docs.forEach(d => { if (docMap[d.document_type]) docMap[d.document_type] = { ...docMap[d.document_type], ...d }; });
+
+    const STATUS_LABEL = {
+        missing: 'Not Uploaded',
+        pending: 'Pending Review',
+        approved: 'Approved',
+        rejected: 'Rejected',
+        expired: 'Expired'
+    };
+    const STATUS_COLOR = {
+        missing:'#9ca3af',
+        pending:'#d97706',
+        approved:'#16a34a',
+        rejected:'#dc2626',
+        expired:'#7c3aed'
+    };
+
+    const docItems = Object.values(docMap).map(d => {
+        const label = d.required ? 'Required' : 'Optional';
+        const uploadDate = d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString() : '';
+        return `
+        <div class="th-module-card">
+            <div class="co-doc-row">
+                <div class="co-doc-info">
+                    <div class="th-module-icon"><i class="ph ph-file-text"></i></div>
+                    <div>
+                        <div class="co-doc-title">${d.label} ${!d.required ? '<span class="th-badge">Optional</span>' : ''}</div>
+                        <div class="co-doc-status" style="color:${STATUS_COLOR[d.status]||'#9ca3af'};">
+                            <span class="th-status-dot" style="background:${STATUS_COLOR[d.status]||'#9ca3af'};"></span>
+                            ${STATUS_LABEL[d.status] || d.status}
+                            ${uploadDate ? `<span style="color:#9ca3af;margin-left:8px;">Uploaded ${uploadDate}</span>` : ''}
+                        </div>
+                        ${d.admin_notes ? `<div class="co-doc-note"><strong>Rejection reason:</strong> ${escapeHtml(d.admin_notes)}</div>` : ''}
+                    </div>
+                </div>
+                <div class="co-doc-actions">
+                    ${d.status !== 'missing' && d.file_url && d.file_url !== 'pending-upload' ? `<a href="${escapeHtml(d.file_url)}" target="_blank" class="btn btn-sm btn-secondary"><i class="ph ph-eye"></i> View</a>` : ''}
+                    <button class="btn btn-sm btn-primary" onclick="openUploadDocumentModal('${d.type}','${d.label}')"><i class="ph ph-upload-simple"></i> ${d.status === 'missing' ? 'Upload' : 'Replace'}</button>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+
+    const formItems = templates.map(t => {
+        const ack = acknowledgements.find(a => a.form_template_id === t.id);
+        const signed = ack && ack.full_name_typed && ack.full_name_typed !== 'PENDING';
+        const signedDate = signed ? new Date(ack.acknowledged_at).toLocaleDateString() : '';
+        return `
+        <div class="th-module-card">
+            <div class="co-doc-row">
+                <div class="co-doc-info">
+                    <div class="th-module-icon"><i class="ph ph-file-text"></i></div>
+                    <div>
+                        <div class="co-doc-title">${t.title} <span class="th-badge th-badge-required">Required</span></div>
+                        <div class="co-doc-status" style="color:${signed?'#16a34a':'#9ca3af'};">
+                            <span class="th-status-dot" style="background:${signed?'#16a34a':'#9ca3af'};"></span>
+                            ${signed ? `Signed ${signedDate}` : 'Not Signed'}
+                        </div>
+                    </div>
+                </div>
+                <div class="co-doc-actions">
+                    <button class="btn btn-sm ${signed ? 'btn-secondary' : 'btn-primary'}" onclick="openSignFormModal('${t.id}')"><i class="ph ${signed ? 'ph-eye' : 'ph-pencil'}"></i> ${signed ? 'Review' : 'Sign'}</button>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+
+    c.innerHTML = `
+        <div class="co-docs-page">
+            <div class="co-doc-section">
+                <div class="co-section-title"><i class="ph ph-upload-simple"></i> Documents to Upload</div>
+                <div class="co-section-sub">Upload the required documents. Optional documents are only needed if applicable.</div>
+                <div class="th-module-grid" style="grid-template-columns:1fr;">${docItems}</div>
+            </div>
+            <div class="co-doc-section">
+                <div class="co-section-title"><i class="ph ph-pencil-simple"></i> Forms & Policies to Sign</div>
+                <div class="co-section-sub">Read each policy carefully and sign to acknowledge you understand it.</div>
+                <div class="th-module-grid" style="grid-template-columns:1fr;">${formItems}</div>
+            </div>
+        </div>`;
+}
+
+async function openUploadDocumentModal(docType, label) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { CareHubToast.error('No caregiver profile linked.'); return; }
+    modalTitle.textContent = `Upload ${label}`;
+    modalBody.innerHTML = `
+        <div class="form-group">
+            <label>File *</label>
+            <input type="file" class="form-control" id="doc-upload-file" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx">
+            <div style="font-size:12px;color:#6b7280;margin-top:4px;">Accepted: PDF, JPG, PNG, DOC, DOCX</div>
+        </div>
+        <div class="form-group">
+            <label>Expiration Date (if applicable)</label>
+            <input type="date" class="form-control" id="doc-upload-expires">
+        </div>`;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveDocumentUpload('${caregiverId}','${docType}')"><i class="ph ph-upload-simple"></i> Upload</button>`;
+    openModal();
+}
+
+async function saveDocumentUpload(caregiverId, docType) {
+    const fileInput = document.getElementById('doc-upload-file');
+    const expires = document.getElementById('doc-upload-expires')?.value || null;
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) { CareHubToast.warning('Select a file to upload.'); return; }
+    const file = fileInput.files[0];
+
+    // Upload to Supabase Storage (bucket: caregiver-documents)
+    try {
+        const filePath = `${caregiverId}/${docType}/${Date.now()}_${file.name}`;
+        const { data: uploadData, error: uploadError } = await supabaseClient.storage
+            .from('caregiver-documents')
+            .upload(filePath, file, { upsert: true });
+        if (uploadError) throw uploadError;
+
+        const { data: publicUrlData } = supabaseClient.storage.from('caregiver-documents').getPublicUrl(filePath);
+        const fileUrl = publicUrlData?.publicUrl || '';
+
+        await createCaregiverDocument({
+            caregiver_id: caregiverId,
+            document_type: docType,
+            file_url: fileUrl,
+            file_name: file.name,
+            file_size: file.size,
+            mime_type: file.type,
+            status: 'pending',
+            expires_on: expires
+        });
+        CareHubToast.success('Document uploaded and pending review.');
+        closeModal();
+        await renderTrainingHub();
+    } catch (e) {
+        console.error('Document upload failed:', e);
+        CareHubToast.error('Upload failed: ' + (e.message || 'Unknown error'));
+    }
+}
+
+async function reviewDocumentUI(id, status) {
+    if (status === 'rejected') { openDocumentReviewModal(id, status); return; }
+    const ok = await reviewCaregiverDocument(id, { status, reviewedBy: getCurrentUserId() });
+    if (ok) { CareHubToast.success('Document approved.'); await renderTrainingHub(); }
+    else { CareHubToast.error('Failed to update document.'); }
+}
+
+async function openDocumentReviewModal(id, status) {
+    const doc = (await getAllCaregiverDocuments({})).find(d => d.id === id);
+    modalTitle.textContent = status === 'approved' ? 'Approve Document' : 'Reject Document';
+    modalBody.innerHTML = `
+        <div class="form-group">
+            <label>Admin Notes</label>
+            <textarea class="form-control" id="doc-review-notes" rows="3" placeholder="Reason for ${status}...">${escapeHtml(doc?.admin_notes || '')}</textarea>
+        </div>`;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-${status === 'approved' ? 'success' : 'danger'}" onclick="saveDocumentReview('${id}','${status}')"><i class="ph ph-floppy-disk"></i> Save</button>`;
+    openModal();
+}
+
+async function saveDocumentReview(id, status) {
+    const notes = document.getElementById('doc-review-notes')?.value?.trim() || null;
+    const ok = await reviewCaregiverDocument(id, { status, reviewedBy: getCurrentUserId(), adminNotes: notes });
+    if (ok) { CareHubToast.success(`Document ${status}.`); closeModal(); await renderTrainingHub(); }
+    else { CareHubToast.error('Failed to update document.'); }
+}
+
+// ── Form Signing Modal ───────────────────────────────────────────────────────
+
+async function openSignFormModal(templateId) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { CareHubToast.error('No caregiver profile linked.'); return; }
+
+    const [template, ack] = await Promise.all([
+        getCaregiverFormTemplateById(templateId),
+        getCaregiverFormAcknowledgement(caregiverId, templateId)
+    ]);
+    if (!template) { CareHubToast.error('Form not found.'); return; }
+
+    const signed = ack && ack.full_name_typed && ack.full_name_typed !== 'PENDING';
+    const signedAt = signed ? new Date(ack.acknowledged_at).toLocaleString() : '';
+
+    modalTitle.textContent = template.title;
+    modalBody.style.maxHeight = '65vh';
+    modalBody.style.overflowY = 'auto';
+
+    modalBody.innerHTML = `
+        <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">Version ${template.version} ${signed ? `<span style="color:#16a34a;font-weight:600;"><i class="ph ph-check-circle"></i> Signed ${signedAt}</span>` : ''}</div>
+        <div class="co-form-content" style="white-space:pre-wrap;font-size:14px;line-height:1.6;background:#f9fafb;padding:16px;border-radius:8px;border:1px solid #e5e7eb;">${escapeHtml(template.content)}</div>
+        ${signed ? '' : `
+        <div class="form-group" style="margin-top:16px;">
+            <label>Type your full legal name to sign *</label>
+            <input type="text" class="form-control" id="sign-form-name" placeholder="First Last">
+            <div style="font-size:12px;color:#6b7280;margin-top:4px;">By typing your name, you agree this is your electronic signature.</div>
+        </div>`}`;
+
+    if (signed) {
+        modalFooter.innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`;
+    } else {
+        modalFooter.innerHTML = `
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveSignFormModal('${caregiverId}','${templateId}')"><i class="ph ph-pencil"></i> Sign & Acknowledge</button>`;
+    }
+    openModal();
+}
+
+async function saveSignFormModal(caregiverId, templateId) {
+    const fullName = document.getElementById('sign-form-name')?.value?.trim();
+    if (!fullName) { CareHubToast.warning('Please type your full legal name.'); return; }
+
+    const ok = await signCaregiverForm({ caregiverId, templateId, fullNameTyped: fullName });
+    if (ok) {
+        CareHubToast.success('Form signed and acknowledged.');
+        closeModal();
+        await renderTrainingHub();
+    } else {
+        CareHubToast.error('Failed to sign form.');
+    }
+}
+
+// ── Training Module Detail Modal ─────────────────────────────────────────────
+
+async function openTrainingModuleDetail(assignmentId, moduleId) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { CareHubToast.error('No caregiver profile linked.'); return; }
+
+    const [module, assignment, questions, attempts] = await Promise.all([
+        getTrainingModuleById(moduleId),
+        assignmentId ? getTrainingAssignmentById(assignmentId) : Promise.resolve(null),
+        getQuizQuestions(moduleId),
+        assignmentId ? getQuizAttemptHistory(assignmentId) : Promise.resolve([])
+    ]);
+    if (!module) { CareHubToast.error('Module not found.'); return; }
+
+    const isCompleted = assignment?.status === 'completed';
+    const alreadyPassed = attempts.some(h => h.passed);
+    const isQuiz = module.content_type === 'quiz' || questions.length > 0;
+
+    modalTitle.textContent = module.title;
+    modalBody.style.maxHeight = '65vh';
+    modalBody.style.overflowY = 'auto';
+
+    let body = `
+        <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">
+            ${module.category ? `<span class="th-badge" style="background:#f3f4f6;color:#374151;">${module.category}</span>` : ''}
+            ${module.duration_minutes ? `<span><i class="ph ph-clock"></i> ${module.duration_minutes} min</span>` : ''}
+            ${isCompleted ? '<span style="color:#16a34a;font-weight:600;"><i class="ph ph-check-circle"></i> Completed</span>' : ''}
+        </div>
+        ${module.content_url ? `<div class="form-group"><a href="${escapeHtml(module.content_url)}" target="_blank" rel="noopener" class="btn btn-secondary"><i class="ph ph-arrow-square-out"></i> Open Resource</a></div>` : ''}
+        ${module.content_body ? `<div class="co-form-content" style="white-space:pre-wrap;font-size:14px;line-height:1.6;background:#f9fafb;padding:16px;border-radius:8px;border:1px solid #e5e7eb;">${escapeHtml(module.content_body)}</div>` : ''}
+    `;
+
+    modalBody.innerHTML = body;
+
+    if (isCompleted) {
+        modalFooter.innerHTML = `
+            <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+            ${isQuiz ? `<button class="btn btn-primary" onclick="openQuizModal('${assignment.id}','${module.id}','${escapeHtml(module.title)}')"><i class="ph ph-arrow-counter-clockwise"></i> Retake Quiz</button>` : ''}
+            ${module.requires_acknowledgement ? `<button class="btn btn-primary" onclick="acknowledgeTrainingUI('${assignment.id}')"><i class="ph ph-check"></i> Re-Acknowledge</button>` : ''}
+        `;
+    } else {
+        modalFooter.innerHTML = `
+            <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+            ${isQuiz ? `<button class="btn btn-primary" onclick="openQuizModal('${assignment?.id || ''}','${module.id}','${escapeHtml(module.title)}')"><i class="ph ph-question"></i> Start Quiz</button>` : ''}
+            ${module.requires_acknowledgement ? `<button class="btn btn-primary" onclick="acknowledgeTrainingUI('${assignment?.id || ''}')"><i class="ph ph-check"></i> Acknowledge & Complete</button>` : ''}
+            ${!isQuiz && !module.requires_acknowledgement ? `<button class="btn btn-success" onclick="markTrainingCompleteUI('${assignment?.id || ''}')"><i class="ph ph-check-circle"></i> Mark Complete</button>` : ''}
+        `;
+    }
+    openModal();
+}
+
+// ── Admin Onboarding Actions ─────────────────────────────────────────────────
+
+async function createOnboardingPlaceholdersUI(caregiverId) {
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Reset Onboarding Placeholders',
+        message: 'This will re-create required training, document, and form placeholders for this caregiver. Existing completed items may be duplicated or replaced depending on server logic. Continue?',
+        confirmText: 'Reset Placeholders',
+        cancelText: 'Cancel',
+        icon: 'ph-arrows-clockwise',
+        iconColor: '#3B82F6'
+    });
+    if (!confirmed) return;
+    const ok = await createOnboardingPlaceholders(caregiverId, { dueDays: 7 });
+    if (ok) { CareHubToast.success('Onboarding placeholders reset.'); await renderTrainingHub(); }
+    else { CareHubToast.error('Failed to reset placeholders.'); }
+}
+
+async function openActivationReviewModal(caregiverId) {
+    const caregiver = await getCaregiverById(caregiverId);
+    const summary = await getCaregiverOnboardingSummary(caregiverId);
+    if (!caregiver) { CareHubToast.error('Caregiver not found.'); return; }
+
+    modalTitle.textContent = `Activation Review: ${caregiver.name}`;
+    modalBody.innerHTML = `
+        <div class="co-review-summary">
+            <div><strong>Current Status:</strong> ${caregiver.activation_status}</div>
+            <div><strong>Progress:</strong> ${summary?.percentage || 0}%</div>
+            <div><strong>Training:</strong> ${summary?.training?.completed || 0}/${summary?.training?.total || 0} complete</div>
+            <div><strong>Documents:</strong> ${summary?.documents?.approved || 0}/${summary?.documents?.total || 0} approved</div>
+            <div><strong>Forms:</strong> ${summary?.forms?.signed || 0}/${summary?.forms?.total || 0} signed</div>
+            <div><strong>Background:</strong> ${summary?.backgroundCheck || 'pending'}</div>
+        </div>
+        <div class="form-group">
+            <label>Decision *</label>
+            <select class="form-control" id="activation-review-decision">
+                <option value="approved">Approve / Activate</option>
+                <option value="flagged">Flag / Hold</option>
+                <option value="rejected">Reject</option>
+                <option value="reviewed">Reviewed (no status change)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Notes</label>
+            <textarea class="form-control" id="activation-review-notes" rows="3" placeholder="Notes for caregiver or other admins..."></textarea>
+        </div>
+        <div class="form-group">
+            <label>Override Reason (if approving with incomplete requirements)</label>
+            <input type="text" class="form-control" id="activation-review-override" placeholder="e.g., background check pending, manual override">
+        </div>
+    `;
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveActivationReviewModal('${caregiverId}')"><i class="ph ph-floppy-disk"></i> Save Review</button>
+    `;
+    openModal();
+}
+
+async function saveActivationReviewModal(caregiverId) {
+    const decision = document.getElementById('activation-review-decision')?.value;
+    const notes = document.getElementById('activation-review-notes')?.value?.trim() || null;
+    const overrideReason = document.getElementById('activation-review-override')?.value?.trim() || null;
+
+    if (!decision) { CareHubToast.warning('Please select a decision.'); return; }
+
+    if (decision === 'approved' && !notes && !overrideReason) {
+        const confirmed = await CareHubConfirm.confirm({
+            title: 'Approve Activation',
+            message: 'Are you sure you want to activate this caregiver? Make sure all requirements are met unless you provide an override reason.',
+            confirmText: 'Activate',
+            cancelText: 'Cancel',
+            icon: 'ph-check-circle',
+            iconColor: '#10B981'
+        });
+        if (!confirmed) return;
+    }
+
+    const ok = await createActivationReview({ caregiverId, decision, notes, overrideReason });
+    if (ok) {
+        CareHubToast.success(`Activation ${decision}.`);
+        closeModal();
+        await renderTrainingHub();
+    } else {
+        CareHubToast.error('Failed to save activation review.');
+    }
+}
+
+function _formTemplateForm(t = {}) {
+    return `
+        <div class="form-group">
+            <label>Title *</label>
+            <input type="text" class="form-control" id="form-template-title" value="${escapeHtml(t.title || '')}">
+        </div>
+        <div class="form-group">
+            <label>Slug</label>
+            <input type="text" class="form-control" id="form-template-slug" value="${escapeHtml(t.slug || '')}" placeholder="e.g. caregiver_agreement">
+        </div>
+        <div class="form-group">
+            <label>Category</label>
+            <select class="form-control" id="form-template-category">
+                <option value="agreement" ${t.category === 'agreement' ? 'selected' : ''}>Agreement</option>
+                <option value="policy" ${t.category === 'policy' ? 'selected' : ''}>Policy</option>
+                <option value="authorization" ${t.category === 'authorization' ? 'selected' : ''}>Authorization</option>
+                <option value="general" ${t.category === 'general' ? 'selected' : ''}>General</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Content *</label>
+            <textarea class="form-control" id="form-template-content" rows="10" placeholder="Full form/policy text...">${escapeHtml(t.content || '')}</textarea>
+        </div>
+        <div class="form-group">
+            <label>Version</label>
+            <input type="text" class="form-control" id="form-template-version" value="${escapeHtml(t.version || '1.0')}">
+        </div>
+        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+            <div class="form-group">
+                <label><input type="checkbox" id="form-template-required" ${t.is_required ? 'checked' : ''}> Required</label>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="form-template-active" ${t.is_active !== false ? 'checked' : ''}> Active</label>
+            </div>
+            <div class="form-group">
+                <label>Sort Order</label>
+                <input type="number" class="form-control" id="form-template-sort-order" value="${t.sort_order || 0}">
+            </div>
+        </div>
+    `;
+}
+
+async function openAddFormTemplateModal() {
+    modalTitle.textContent = 'Add Form Template';
+    modalBody.innerHTML = _formTemplateForm();
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveFormTemplateModal()"><i class="ph ph-floppy-disk"></i> Save</button>
+    `;
+    openModal();
+}
+
+async function openEditFormTemplateModal(id) {
+    const t = await getCaregiverFormTemplateById(id);
+    if (!t) { CareHubToast.error('Form template not found.'); return; }
+    modalTitle.textContent = 'Edit Form Template';
+    modalBody.innerHTML = _formTemplateForm(t);
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveFormTemplateModal('${id}')"><i class="ph ph-floppy-disk"></i> Save</button>
+    `;
+    openModal();
+}
+
+async function saveFormTemplateModal(id) {
+    const payload = {
+        title: document.getElementById('form-template-title')?.value?.trim(),
+        slug: document.getElementById('form-template-slug')?.value?.trim() || null,
+        category: document.getElementById('form-template-category')?.value,
+        content: document.getElementById('form-template-content')?.value?.trim(),
+        version: document.getElementById('form-template-version')?.value?.trim() || '1.0',
+        is_required: document.getElementById('form-template-required')?.checked || false,
+        is_active: document.getElementById('form-template-active')?.checked !== false,
+        sort_order: parseInt(document.getElementById('form-template-sort-order')?.value || 0, 10)
+    };
+    if (!payload.title || !payload.content) { CareHubToast.warning('Title and content are required.'); return; }
+
+    const ok = id ? await updateCaregiverFormTemplate(id, payload) : await createCaregiverFormTemplate(payload);
+    if (ok) {
+        CareHubToast.success('Form template saved.');
+        closeModal();
+        await renderTrainingHub();
+    } else {
+        CareHubToast.error('Failed to save form template.');
+    }
+}
+
+async function deleteFormTemplateUI(id) {
+    const confirmed = await CareHubConfirm.confirm({
+        title: 'Delete Form Template',
+        message: 'Are you sure? This will also remove existing caregiver acknowledgements.',
+        confirmText: 'Delete',
+        cancelText: 'Cancel',
+        icon: 'ph-trash',
+        iconColor: '#EF4444'
+    });
+    if (!confirmed) return;
+    const ok = await deleteCaregiverFormTemplate(id);
+    if (ok) { CareHubToast.success('Form template deleted.'); await renderTrainingHub(); }
+    else { CareHubToast.error('Failed to delete form template.'); }
+}
+
+// ── Certificates Tab ─────────────────────────────────────────────────────────
+
+async function _renderCertificatesTab(c, role, isAdmin) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { c.innerHTML = '<div class="empty-state"><h3>No caregiver profile linked.</h3></div>'; return; }
+
+    const certs = await getCaregiverCertificates(caregiverId);
+    if (certs.length === 0) {
+        c.innerHTML = `<div class="empty-state"><div class="empty-state-icon"><i class="ph ph-certificate"></i></div><h3>No certificates yet</h3><p>Complete training modules to earn certificates.</p></div>`;
+        return;
+    }
+
+    c.innerHTML = `<div class="th-module-grid">
+        ${certs.map(cert => `
+            <div class="th-module-card" style="border-left:3px solid #16a34a;">
+                <div style="display:flex;gap:12px;align-items:flex-start;">
+                    <div class="th-module-icon" style="background:#dcfce7;color:#16a34a;"><i class="ph ph-certificate"></i></div>
+                    <div style="flex:1;">
+                        <div style="font-weight:600;">${escapeHtml(cert.module_name)}</div>
+                        <div style="font-size:13px;color:#6b7280;">Score: ${cert.score}% · Issued ${new Date(cert.issued_at).toLocaleDateString()}</div>
+                        <div style="font-size:12px;color:#9ca3af;margin-top:2px;">Cert # ${escapeHtml(cert.certificate_number || 'N/A')}</div>
+                        <div style="margin-top:10px;">
+                            <button class="btn btn-sm btn-primary" onclick="downloadCertificateById('${cert.id}')"><i class="ph ph-download-simple"></i> Download PDF</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `).join('')}
+    </div>`;
+}
+
+// ── Admin Tabs (Caregiver Onboarding) ────────────────────────────────────────
+
+async function _renderAdminOverviewTab(c, isAdmin) {
+    const [caregivers, overdue, pendingDocs] = await Promise.all([
+        getCaregivers(),
+        getOverdueTrainingAssignments(),
+        getAllCaregiverDocuments({ status: 'pending' })
+    ]);
+
+    const statusCounts = {};
+    const STATUS_ORDER = ['application_approved','training_required','training_in_progress','documents_required','documents_pending_review','background_pending','ready_for_final_review','active','rejected','inactive'];
+    STATUS_ORDER.forEach(s => statusCounts[s] = 0);
+    caregivers.forEach(cg => { statusCounts[cg.activation_status] = (statusCounts[cg.activation_status] || 0) + 1; });
+
+    const STATUS_LABEL = {
+        application_approved: 'Application Approved',
+        training_required: 'Training Required',
+        training_in_progress: 'Training In Progress',
+        documents_required: 'Documents Required',
+        documents_pending_review: 'Documents Pending Review',
+        background_pending: 'Background Pending',
+        ready_for_final_review: 'Ready for Final Review',
+        active: 'Active',
+        rejected: 'Rejected',
+        inactive: 'Inactive'
+    };
+    const STATUS_COLOR = {
+        application_approved:'#6b7280', training_required:'#d97706', training_in_progress:'#3b82f6',
+        documents_required:'#d97706', documents_pending_review:'#d97706', background_pending:'#8b5cf6',
+        ready_for_final_review:'#10b981', active:'#16a34a', rejected:'#dc2626', inactive:'#6b7280'
+    };
+
+    const statusCards = STATUS_ORDER.map(s => `
+        <div class="kpi-card" style="border-top:3px solid ${STATUS_COLOR[s]};">
+            <div class="kpi-value" style="color:${STATUS_COLOR[s]};">${statusCounts[s] || 0}</div>
+            <div class="kpi-label">${STATUS_LABEL[s]}</div>
+        </div>
+    `).join('');
+
+    const pendingRows = pendingDocs.slice(0, 8).map(d => `
+        <tr>
+            <td>${escapeHtml(d.caregivers?.name || 'Unknown')}</td>
+            <td>${_documentTypeLabel(d.document_type)}</td>
+            <td>${d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString() : '-'}</td>
+            <td><button class="btn btn-sm btn-secondary" onclick="openDocumentReviewModal('${d.id}','approved')">Review</button></td>
+        </tr>
+    `).join('');
+
+    const overdueRows = overdue.slice(0, 8).map(o => `
+        <tr>
+            <td>${escapeHtml(o.caregivers?.name || 'Unknown')}</td>
+            <td>${escapeHtml(o.training_modules?.title || 'Unknown')}</td>
+            <td style="color:#dc2626;">${o.due_date ? new Date(o.due_date).toLocaleDateString() : '-'}</td>
+        </tr>
+    `).join('');
+
+    c.innerHTML = `
+        <div class="cc-kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));">${statusCards}</div>
+        <div class="co-admin-actions" style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" onclick="assignRequiredTrainingToAllEligibleUI()"><i class="ph ph-users-three"></i> Assign Required Training</button>
+            <button class="btn btn-secondary btn-sm" onclick="backfillRequiredTrainingUI()"><i class="ph ph-arrows-clockwise"></i> Backfill Existing Caregivers</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+            <div class="card">
+                <div class="card-header"><h3><i class="ph ph-files"></i> Pending Documents</h3></div>
+                <div class="card-body" style="padding:0;max-height:300px;overflow:auto;">
+                    ${pendingDocs.length === 0 ? '<div style="padding:16px;color:#6b7280;">No documents pending review.</div>' : `
+                    <table class="data-table">
+                        <thead><tr><th>Caregiver</th><th>Document</th><th>Uploaded</th><th>Action</th></tr></thead>
+                        <tbody>${pendingRows}</tbody>
+                    </table>`}
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3><i class="ph ph-warning-octagon"></i> Overdue Training</h3></div>
+                <div class="card-body" style="padding:0;max-height:300px;overflow:auto;">
+                    ${overdue.length === 0 ? '<div style="padding:16px;color:#6b7280;">No overdue assignments.</div>' : `
+                    <table class="data-table">
+                        <thead><tr><th>Caregiver</th><th>Module</th><th>Due</th></tr></thead>
+                        <tbody>${overdueRows}</tbody>
+                    </table>`}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function _renderAdminCaregiverProgressTab(c, isAdmin) {
+    const caregivers = await getCaregivers();
+    const STATUS_LABEL = {
+        application_approved:'Application Approved', training_required:'Training Required', training_in_progress:'Training In Progress',
+        documents_required:'Documents Required', documents_pending_review:'Pending Review', background_pending:'Background Pending',
+        ready_for_final_review:'Ready for Final Review', active:'Active', rejected:'Rejected', inactive:'Inactive'
+    };
+
+    const rows = await Promise.all(caregivers.map(async cg => {
+        const summary = await getCaregiverOnboardingSummary(cg.id);
+        return { cg, summary };
+    }));
+
+    const tableRows = rows.map(({ cg, summary }) => {
+        const statusLabel = (window.STATUS_CONFIG && window.STATUS_CONFIG[cg.activation_status]?.label) || STATUS_LABEL[cg.activation_status] || cg.activation_status;
+        return `
+            <tr>
+                <td><strong>${escapeHtml(cg.name)}</strong><div style="font-size:12px;color:#6b7280;">${escapeHtml(cg.email || '')}</div></td>
+                <td>${statusLabel}</td>
+                <td>
+                    <div class="co-progress-mini">
+                        <div class="co-progress-mini-fill" style="width:${summary?.percentage || 0}%;"></div>
+                    </div>
+                    <div style="font-size:12px;color:#6b7280;">${summary?.percentage || 0}%</div>
+                </td>
+                <td>
+                    <button class="btn btn-sm btn-secondary" onclick="viewCaregiver('${cg.id}')"><i class="ph ph-eye"></i> View</button>
+                    <button class="btn btn-sm btn-primary" onclick="openActivationReviewModal('${cg.id}')"><i class="ph ph-gavel"></i> Review</button>
+                    <button class="btn btn-sm btn-secondary" onclick="createOnboardingPlaceholdersUI('${cg.id}')"><i class="ph ph-arrows-clockwise"></i> Reset</button>
+                </td>
+            </tr>
+        `;
+    }).join('');
+
+    c.innerHTML = `
+        <div class="card">
+            <div class="card-header"><h3>All Caregiver Onboarding Progress</h3></div>
+            <div class="card-body" style="padding:0;">
+                <div style="overflow:auto;">
+                    <table class="data-table">
+                        <thead><tr><th>Caregiver</th><th>Status</th><th>Progress</th><th>Actions</th></tr></thead>
+                        <tbody>${tableRows}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>`;
+}
+
+async function _renderAdminTrainingLibraryTab(c, isAdmin) {
+    const modules = await getTrainingModules({ activeOnly: false });
+    const CATEGORY_ICON = { onboarding:'ph-clipboard', safety:'ph-shield-check', clinical:'ph-stethoscope', compliance:'ph-scales', soft_skills:'ph-chat-circle', policy:'ph-file-text', general:'ph-books' };
+    const TYPE_ICON = { document:'ph-file-text', video:'ph-video', link:'ph-link', quiz:'ph-question', photo_guide:'ph-images', acknowledgement:'ph-check', mixed:'ph-stack' };
+
+    const cards = modules.map(m => `
+        <div class="th-module-card">
+            <div class="th-module-card-main">
+                <div class="th-module-icon"><i class="ph ${CATEGORY_ICON[m.category]||'ph-books'}"></i></div>
+                <div style="flex:1;min-width:0;">
+                    <div class="th-module-title-row">
+                        <strong>${escapeHtml(m.title)}</strong>
+                        ${m.is_required ? '<span class="th-badge th-badge-required">Required</span>' : ''}
+                        ${!m.is_active ? '<span class="th-badge" style="background:#f3f4f6;color:#6b7280;">Inactive</span>' : ''}
+                    </div>
+                    <div class="th-module-meta">
+                        <span class="th-badge" style="background:#f3f4f6;color:#374151;">${m.category}</span>
+                        ${m.duration_minutes ? `<span><i class="ph ph-clock"></i> ${m.duration_minutes} min</span>` : ''}
+                        <i class="ph ${TYPE_ICON[m.content_type]||'ph-file'}" title="${m.content_type}"></i>
+                    </div>
+                    <div class="th-module-actions">
+                        <button class="btn btn-sm btn-secondary" onclick="openAssignModuleModal('${m.id}','${escapeHtml(m.title)}')"><i class="ph ph-user-plus"></i> Assign</button>
+                        <button class="btn btn-sm btn-secondary" onclick="openEditTrainingModuleModal('${m.id}')"><i class="ph ph-pencil"></i> Edit</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteTrainingModuleUI('${m.id}')"><i class="ph ph-trash"></i></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `).join('');
+
+    c.innerHTML = `
+        <div class="page-header" style="margin-bottom:12px;">
+            <h2>Training Library</h2>
+            <button class="btn btn-primary btn-sm" onclick="openAddTrainingModuleModal()"><i class="ph ph-plus"></i> Add Training</button>
+        </div>
+        <div class="th-module-grid">${cards}</div>
+    `;
+}
+
+async function _renderAdminDocumentsSignaturesTab(c, isAdmin) {
+    const pendingDocs = await getAllCaregiverDocuments({ status: 'pending' });
+    const acks = await getAllCaregiverFormAcknowledgements ? await getAllCaregiverFormAcknowledgements() : [];
+    const DOC_LABELS = {
+        drivers_license: "Driver's License", auto_insurance: 'Auto Insurance', vehicle_registration: 'Vehicle Registration',
+        background_check_authorization: 'Background Check Authorization', w9: 'W9', direct_deposit: 'Direct Deposit Form',
+        cpr_first_aid_certificate: 'CPR / First Aid Certificate', signed_policies: 'Signed Policies'
+    };
+
+    const docRows = pendingDocs.map(d => `
+        <tr>
+            <td>${escapeHtml(d.caregivers?.name || 'Unknown')}</td>
+            <td>${DOC_LABELS[d.document_type] || d.document_type}</td>
+            <td>${d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString() : '-'}</td>
+            <td>
+                <a href="${escapeHtml(d.file_url)}" target="_blank" class="btn btn-sm btn-secondary"><i class="ph ph-eye"></i> View</a>
+                <button class="btn btn-sm btn-success" onclick="reviewDocumentUI('${d.id}','approved')"><i class="ph ph-check"></i></button>
+                <button class="btn btn-sm btn-danger" onclick="openDocumentReviewModal('${d.id}','rejected')"><i class="ph ph-x"></i></button>
+            </td>
+        </tr>
+    `).join('');
+
+    const ackRows = (acks || []).slice(0, 20).map(a => `
+        <tr>
+            <td>${escapeHtml(a.caregivers?.name || 'Unknown')}</td>
+            <td>${escapeHtml(a.caregiver_form_templates?.title || '')}</td>
+            <td>${escapeHtml(a.full_name_typed || '')}</td>
+            <td>${a.acknowledged_at ? new Date(a.acknowledged_at).toLocaleDateString() : '-'}</td>
+        </tr>
+    `).join('');
+
+    c.innerHTML = `
+        <div class="co-docs-page">
+            <div class="co-doc-section">
+                <div class="co-section-title"><i class="ph ph-upload-simple"></i> Pending Document Uploads</div>
+                <div class="card-body" style="padding:0;">
+                    ${pendingDocs.length === 0 ? '<div style="padding:16px;color:#6b7280;">No pending documents.</div>' : `
+                    <table class="data-table">
+                        <thead><tr><th>Caregiver</th><th>Document</th><th>Uploaded</th><th>Actions</th></tr></thead>
+                        <tbody>${docRows}</tbody>
+                    </table>`}
+                </div>
+            </div>
+            <div class="co-doc-section">
+                <div class="co-section-title"><i class="ph ph-pencil-simple"></i> Recent Form Signatures</div>
+                <div class="card-body" style="padding:0;">
+                    ${ackRows.length === 0 ? '<div style="padding:16px;color:#6b7280;">No form signatures yet.</div>' : `
+                    <table class="data-table">
+                        <thead><tr><th>Caregiver</th><th>Form</th><th>Signed As</th><th>Date</th></tr></thead>
+                        <tbody>${ackRows}</tbody>
+                    </table>`}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function _renderAdminSettingsTab(c, isAdmin) {
+    const templates = await getCaregiverFormTemplates({ activeOnly: false });
+    const rows = templates.map(t => `
+        <tr>
+            <td>${escapeHtml(t.title)}</td>
+            <td>${t.category}</td>
+            <td>${t.is_required ? '<span class="th-badge th-badge-required">Required</span>' : '<span class="th-badge">Optional</span>'}</td>
+            <td>${t.is_active ? 'Active' : 'Inactive'}</td>
+            <td>
+                <button class="btn btn-sm btn-secondary" onclick="openEditFormTemplateModal('${t.id}')"><i class="ph ph-pencil"></i> Edit</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteFormTemplateUI('${t.id}')"><i class="ph ph-trash"></i></button>
+            </td>
+        </tr>
+    `).join('');
+
+    c.innerHTML = `
+        <div class="page-header" style="margin-bottom:12px;">
+            <h2>Onboarding Settings</h2>
+            <button class="btn btn-primary btn-sm" onclick="openAddFormTemplateModal()"><i class="ph ph-plus"></i> Add Form Template</button>
+        </div>
+        <div class="card">
+            <div class="card-body" style="padding:0;">
+                <table class="data-table">
+                    <thead><tr><th>Form Template</th><th>Category</th><th>Required</th><th>Active</th><th>Actions</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </div>
+    `;
+}
+
+// ── Quiz Engine ───────────────────────────────────────────────────────────────
+
+async function openQuizModal(assignmentId, moduleId, moduleTitle) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { CareHubToast.error('No caregiver profile linked.'); return; }
+
+    const [questions, history, assignment] = await Promise.all([
+        getQuizQuestions(moduleId),
+        getQuizAttemptHistory(assignmentId),
+        getTrainingAssignmentById(assignmentId)
+    ]);
+
+    const module = await getTrainingModuleById(moduleId);
+    const passingScore = module?.passing_score || 80;
+    const maxAttempts = module?.max_attempts || 0;
+    const attemptsUsed = history.length;
+    const attemptsRemaining = maxAttempts > 0 ? Math.max(0, maxAttempts - attemptsUsed) : 'Unlimited';
+    const bestScore = history.length > 0 ? Math.max(...history.map(h => h.score)) : null;
+    const canRetake = module?.allow_retake !== false && (maxAttempts === 0 || attemptsUsed < maxAttempts);
+    const alreadyPassed = history.some(h => h.passed);
+
+    if (questions.length === 0) {
+        CareHubToast.error('No quiz questions found for this module.');
+        return;
+    }
+
+    modalTitle.textContent = `Quiz: ${moduleTitle}`;
+    modalBody.style.maxHeight = '70vh';
+    modalBody.style.overflowY = 'auto';
+
+    let historyHtml = '';
+    if (history.length > 0) {
+        historyHtml = `
+            <div style="margin-bottom:16px;padding:12px;background:#f9fafb;border-radius:8px;">
+                <div style="font-weight:600;font-size:13px;margin-bottom:6px;">Attempt History</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    ${history.map(h => `
+                        <span style="font-size:12px;padding:3px 8px;border-radius:12px;background:${h.passed?'#dcfce7;color:#16a34a':'#fee2e2;color:#dc2626'};">
+                            Attempt ${h.attempt_number}: ${h.score}% ${h.passed ? 'PASS' : 'FAIL'}
+                        </span>
+                    `).join('')}
+                </div>
+                ${bestScore !== null ? `<div style="font-size:12px;color:#6b7280;margin-top:6px;">Best score: ${bestScore}% · Passing: ${passingScore}% · Attempts remaining: ${attemptsRemaining}</div>` : ''}
+            </div>`;
+    }
+
+    if (alreadyPassed && !canRetake) {
+        modalBody.innerHTML = historyHtml + `
+            <div style="text-align:center;padding:20px;">
+                <div style="font-size:18px;color:#16a34a;font-weight:700;"><i class="ph ph-check-circle"></i> Module Passed</div>
+                <div style="margin-top:8px;color:#6b7280;">You have already passed this quiz. Retakes are not allowed.</div>
+            </div>`;
+        modalFooter.innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`;
+        openModal();
+        return;
+    }
+
+    modalBody.innerHTML = historyHtml + `
+        <div id="quiz-container">
+            ${questions.map((q, i) => `
+                <div class="quiz-question" style="margin-bottom:16px;padding:12px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;" data-question-id="${q.id}">
+                    <div style="font-weight:600;margin-bottom:8px;">${i + 1}. ${escapeHtml(q.question_text)}</div>
+                    <div style="display:flex;flex-direction:column;gap:6px;">
+                        ${(Array.isArray(q.choices) ? q.choices : JSON.parse(q.choices)).map((choice, ci) => `
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 8px;border-radius:6px;hover:#f9fafb;">
+                                <input type="radio" name="q_${q.id}" value="${ci}" style="width:auto;">
+                                <span style="font-size:14px;">${escapeHtml(choice)}</span>
+                            </label>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('')}
+            <div id="quiz-result" style="display:none;"></div>
+        </div>`;
+
+    modalFooter.innerHTML = `
+        <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+        <button class="btn btn-primary" id="submitQuizBtn" onclick="submitQuiz('${assignmentId}','${moduleId}','${escapeHtml(moduleTitle)}')"><i class="ph ph-paper-plane-right"></i> Submit Quiz</button>`;
+    openModal();
+}
+
+async function submitQuiz(assignmentId, moduleId, moduleTitle) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { CareHubToast.error('No caregiver profile linked.'); return; }
+
+    const questions = await getQuizQuestions(moduleId);
+    const answers = [];
+    let answered = 0;
+    questions.forEach(q => {
+        const selected = document.querySelector(`input[name="q_${q.id}"]:checked`);
+        if (selected) {
+            answered++;
+            const selectedIndex = parseInt(selected.value, 10);
+            const correct = selectedIndex === q.correct_index;
+            answers.push({ question_id: q.id, selected_index: selectedIndex, correct });
+        } else {
+            answers.push({ question_id: q.id, selected_index: null, correct: false });
+        }
+    });
+
+    if (answered < questions.length) {
+        CareHubToast.warning('Please answer all questions before submitting.');
+        return;
+    }
+
+    const correctCount = answers.filter(a => a.correct).length;
+    const score = Math.round((correctCount / questions.length) * 100);
+    const module = await getTrainingModuleById(moduleId);
+    const passingScore = module?.passing_score || 80;
+    const passed = score >= passingScore;
+
+    const submitBtn = document.getElementById('submitQuizBtn');
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<i class="ph ph-spinner"></i> Grading...'; }
+
+    await submitQuizAttempt({ assignmentId, caregiverId, moduleId, answers, score, passed });
+
+    renderQuizResult(score, passed, passingScore, correctCount, questions.length, moduleTitle);
+    await renderTrainingHub();
+}
+
+function renderQuizResult(score, passed, passingScore, correct, total, moduleTitle) {
+    const container = document.getElementById('quiz-container');
+    const result = document.getElementById('quiz-result');
+    if (container) container.style.display = 'none';
+    if (result) {
+        result.style.display = 'block';
+        result.innerHTML = `
+            <div style="text-align:center;padding:24px;background:${passed?'#f0fdf4':'#fef2f2'};border-radius:12px;border:2px solid ${passed?'#16a34a':'#dc2626'};">
+                <div style="font-size:32px;margin-bottom:8px;">${passed ? '<i class="ph ph-check-circle" style="color:#16a34a;"></i>' : '<i class="ph ph-x-circle" style="color:#dc2626;"></i>'}</div>
+                <div style="font-size:22px;font-weight:700;color:${passed?'#16a34a':'#dc2626'};">${passed ? 'Congratulations!' : 'Quiz Not Passed'}</div>
+                <div style="font-size:18px;font-weight:600;margin:8px 0;">Score: ${score}% (${correct}/${total})</div>
+                <div style="color:#6b7280;">Passing score: ${passingScore}%</div>
+                ${passed ? `
+                    <div style="margin-top:16px;">
+                        <button class="btn btn-primary" onclick="downloadCertificateForModule('${moduleId}'); closeModal();"><i class="ph ph-download-simple"></i> Download Certificate</button>
+                    </div>
+                ` : `
+                    <div style="margin-top:16px;color:#6b7280;">Review the material and try again.</div>
+                `}
+            </div>`;
+    }
+    const submitBtn = document.getElementById('submitQuizBtn');
+    if (submitBtn) { submitBtn.style.display = 'none'; }
+}
+
+async function downloadCertificateForModule(moduleId) {
+    const caregiverId = window.RoleFilter ? window.RoleFilter.getCurrentCaregiverId() : null;
+    if (!caregiverId) { CareHubToast.error('No caregiver profile linked.'); return; }
+    const certs = await getCaregiverCertificates(caregiverId);
+    const cert = certs.find(c => c.module_id === moduleId);
+    if (!cert) { CareHubToast.warning('No certificate found for this module. Pass the quiz first.'); return; }
+    await downloadCertificateById(cert.id);
+}
+
+async function downloadCertificateById(certId) {
+    const cert = await getCertificateById(certId);
+    if (!cert) { CareHubToast.error('Certificate not found.'); return; }
+
+    // Use jsPDF if loaded, otherwise fallback to print-friendly HTML
+    if (typeof window.jspdf === 'undefined' || typeof window.jspdf.jsPDF === 'undefined') {
+        _printCertificate(cert);
+        return;
+    }
+
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF('landscape', 'pt', 'letter');
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+
+    // Border
+    pdf.setDrawColor(180, 140, 90);
+    pdf.setLineWidth(4);
+    pdf.rect(30, 30, pageWidth - 60, pageHeight - 60);
+
+    // Header
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(32);
+    pdf.setTextColor(180, 140, 90);
+    pdf.text('Certificate of Completion', pageWidth / 2, 100, { align: 'center' });
+
+    pdf.setFontSize(16);
+    pdf.setTextColor(80, 80, 80);
+    pdf.text('SeniorSitters CareHub Training', pageWidth / 2, 135, { align: 'center' });
+
+    // Body
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(18);
+    pdf.setTextColor(50, 50, 50);
+    pdf.text('This certifies that', pageWidth / 2, 190, { align: 'center' });
+
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(28);
+    pdf.setTextColor(0, 0, 0);
+    pdf.text(cert.caregivers?.name || 'Caregiver', pageWidth / 2, 235, { align: 'center' });
+
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(16);
+    pdf.setTextColor(50, 50, 50);
+    pdf.text('has successfully completed', pageWidth / 2, 275, { align: 'center' });
+
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(24);
+    pdf.setTextColor(180, 140, 90);
+    pdf.text(cert.module_name, pageWidth / 2, 315, { align: 'center' });
+
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(16);
+    pdf.setTextColor(50, 50, 50);
+    pdf.text(`Score: ${cert.score}% · Completion Date: ${new Date(cert.issued_at).toLocaleDateString()}`, pageWidth / 2, 355, { align: 'center' });
+
+    // Footer
+    pdf.setFontSize(12);
+    pdf.setTextColor(120, 120, 120);
+    pdf.text(`Certificate #: ${cert.certificate_number || 'N/A'}`, pageWidth / 2, pageHeight - 80, { align: 'center' });
+    pdf.text('SeniorSitters — Family-owned non-medical companion care', pageWidth / 2, pageHeight - 55, { align: 'center' });
+
+    pdf.save(`SeniorSitters_Certificate_${cert.caregivers?.name?.replace(/\s+/g, '_') || 'caregiver'}_${cert.module_name?.replace(/\s+/g, '_') || 'module'}.pdf`);
+}
+
+function _printCertificate(cert) {
+    const w = window.open('', '_blank');
+    if (!w) { CareHubToast.error('Popup blocked. Allow popups to print certificate.'); return; }
+    w.document.write(`
+        <!DOCTYPE html><html><head><title>Certificate</title>
+        <style>
+            body { font-family: Georgia, serif; margin: 0; padding: 40px; background: #fff; }
+            .cert { border: 8px solid #b58a5a; padding: 60px; text-align: center; max-width: 900px; margin: 0 auto; }
+            h1 { color: #b58a5a; font-size: 42px; margin-bottom: 8px; }
+            h2 { color: #555; font-size: 20px; font-weight: normal; margin-top: 0; }
+            .name { font-size: 34px; font-weight: bold; margin: 24px 0; color: #222; }
+            .module { font-size: 26px; color: #b58a5a; font-weight: bold; margin: 16px 0; }
+            .details { font-size: 16px; color: #444; margin: 24px 0; }
+            .footer { font-size: 13px; color: #777; margin-top: 40px; }
+        </style></head><body>
+        <div class="cert">
+            <h1>Certificate of Completion</h1>
+            <h2>SeniorSitters CareHub Training</h2>
+            <div class="details">This certifies that</div>
+            <div class="name">${escapeHtml(cert.caregivers?.name || 'Caregiver')}</div>
+            <div class="details">has successfully completed</div>
+            <div class="module">${escapeHtml(cert.module_name)}</div>
+            <div class="details">Score: ${cert.score}% · Completion Date: ${new Date(cert.issued_at).toLocaleDateString()}</div>
+            <div class="footer">Certificate #: ${escapeHtml(cert.certificate_number || 'N/A')}<br>SeniorSitters — Family-owned non-medical companion care</div>
+        </div>
+        <script>window.onload = function(){ window.print(); setTimeout(()=>window.close(), 500); };</script>
+        </body></html>
+    `);
+    w.document.close();
+}
+
 // ── Admin Modals: Training Module ────────────────────────────────────────────
 
 function openAddTrainingModuleModal() {
@@ -7952,7 +9302,7 @@ function _trainingModuleForm(m = {}) {
                 </div>
                 <div class="form-group" style="margin:0;">
                     <label style="font-weight:600;">Content Type</label>
-                    <select class="form-select" id="tm-type" style="width:100%;">
+                    <select class="form-select" id="tm-type" style="width:100%;" onchange="document.getElementById('quiz-settings').style.display = this.value === 'quiz' ? 'block' : 'none'">
                         ${types.map(t => `<option value="${t}" ${(m.content_type||'document')===t?'selected':''}>${t.replace(/_/g,' ').replace(/\b\w/g,l=>l.toUpperCase())}</option>`).join('')}
                     </select>
                 </div>
@@ -7975,6 +9325,21 @@ function _trainingModuleForm(m = {}) {
                         <input type="checkbox" id="tm-ack" style="width:16px;height:16px;accent-color:#b45309;" ${m.requires_acknowledgement?'checked':''}>
                         <span>Requires acknowledgement</span>
                     </label>
+                </div>
+            </div>
+
+            <!-- Quiz Settings -->
+            <div id="quiz-settings" style="display:${(m.content_type||'document')==='quiz'?'block':'none'};background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:14px;">
+                <div style="font-size:12px;font-weight:700;color:#0369a1;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px;"><i class="ph ph-question"></i> Quiz Settings</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-weight:600;">Passing Score (%)</label>
+                        <input type="number" class="form-control" id="tm-passing-score" value="${m.passing_score ?? 80}" min="1" max="100" placeholder="80" style="width:100%;">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-weight:600;">Max Attempts (0 = unlimited)</label>
+                        <input type="number" class="form-control" id="tm-max-attempts" value="${m.max_attempts ?? 0}" min="0" placeholder="0" style="width:100%;">
+                    </div>
                 </div>
             </div>
 
@@ -8224,6 +9589,8 @@ async function saveTrainingModuleModal(id) {
         duration_minutes:         parseInt(document.getElementById('tm-duration')?.value)||null,
         is_required:              document.getElementById('tm-required')?.checked||false,
         requires_acknowledgement: document.getElementById('tm-ack')?.checked||false,
+        passing_score:            parseInt(document.getElementById('tm-passing-score')?.value) || 80,
+        max_attempts:             parseInt(document.getElementById('tm-max-attempts')?.value) || 0,
         is_active: true
     };
     let ok;
@@ -8654,6 +10021,25 @@ window.openEditResourceModal = openEditResourceModal;
 window.saveResourceModal = saveResourceModal;
 window.deleteResourceUI = deleteResourceUI;
 window.applyTrainingTemplate = applyTrainingTemplate;
+window.openQuizModal = openQuizModal;
+window.submitQuiz = submitQuiz;
+window.downloadCertificateForModule = downloadCertificateForModule;
+window.downloadCertificateById = downloadCertificateById;
+window.openUploadDocumentModal = openUploadDocumentModal;
+window.saveDocumentUpload = saveDocumentUpload;
+window.reviewDocumentUI = reviewDocumentUI;
+window.openDocumentReviewModal = openDocumentReviewModal;
+window.saveDocumentReview = saveDocumentReview;
+window.openSignFormModal = openSignFormModal;
+window.saveSignFormModal = saveSignFormModal;
+window.openTrainingModuleDetail = openTrainingModuleDetail;
+window.createOnboardingPlaceholdersUI = createOnboardingPlaceholdersUI;
+window.openActivationReviewModal = openActivationReviewModal;
+window.saveActivationReviewModal = saveActivationReviewModal;
+window.openAddFormTemplateModal = openAddFormTemplateModal;
+window.openEditFormTemplateModal = openEditFormTemplateModal;
+window.saveFormTemplateModal = saveFormTemplateModal;
+window.deleteFormTemplateUI = deleteFormTemplateUI;
 window.renderNotifications = renderNotifications;
 window._applyNotifFilter = _applyNotifFilter;
 window._loadNotificationsContent = _loadNotificationsContent;

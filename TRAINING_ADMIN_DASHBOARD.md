@@ -351,6 +351,74 @@ WHERE cop.status = 'flagged';
 - [ ] Set real business phone in emergency resources
 - [ ] Train admin staff on dashboard use
 - [ ] Document any custom training modules added
+- [ ] Review pending caregiver documents under Training Hub → Documents
+- [ ] Verify only active caregivers appear in scheduling dropdowns
+
+---
+
+## Phase 2: Training Dashboard, Documents & Activation Compliance
+
+### New Dashboard Metrics
+The Training Hub Dashboard tab now displays:
+- **Total Assigned Training** — sum of all required module assignments
+- **Completion Rate** — percentage of completed required assignments
+- **Overdue Training** — assignments past their due date
+- **Due Within 7 Days** — upcoming due dates
+- **New Caregiver Onboarding** — caregivers with status `onboarding`
+- **Active Caregivers** — caregivers with `activation_status = active`
+- **In Training / Documents** — caregivers in `training_required`, `training_complete`, or `documents_required`
+- **Flagged Caregivers** — caregivers with `activation_status = flagged`
+- **Document Compliance** — lowest document approval percentages first
+
+### Document Review Workflow
+1. Caregiver uploads a required document in Training Hub → Documents
+2. Document status becomes `pending`
+3. Admin opens Training Hub → Documents to review pending uploads
+4. Admin approves or rejects with notes
+5. Approval advances the caregiver toward `active` activation status
+
+### Activation Compliance Enforcement
+- Schedule creation and edit dropdowns only include caregivers with `activation_status = active`
+- The database layer (`createSchedule`/`updateSchedule`) blocks scheduling ineligible caregivers
+- Caregiver profile overview shows activation status and document/training progress
+- Caregiver directory includes a `Flagged` filter for quick compliance review
+
+---
+
+## Phase 3: Automatic Training Assignment & Activation
+
+### Application Approval Flow
+When an admin approves a caregiver application:
+1. The caregiver profile is created with `status = onboarding` and `activation_status = training_required`.
+2. All required active training modules are automatically assigned with a 7-day due date.
+3. Required document placeholders are created.
+4. A portal invite can be sent immediately or later.
+5. The caregiver sees assigned training as soon as they log in.
+
+### Training Status Badges
+The caregiver directory and profile display a Phase 3 badge:
+- **Training Required** — `activation_status = training_required`.
+- **Training In Progress** — some training complete or training done but documents/background check pending.
+- **Active** — `activation_status = active`.
+- **Training Overdue** — a required assignment is past its due date.
+
+### Bulk Admin Actions
+In Training Hub → Training, admins can:
+- **Assign Required Training to All Eligible Caregivers** — assigns missing modules to all caregivers with `activation_status = training_required`.
+- **Backfill Existing Caregivers** — assigns missing modules to all onboarding and active caregivers, useful for caregivers approved before the automation existed.
+
+Both actions skip caregivers who already have the required assignments.
+
+### Dashboard Alerts
+The Command Center alerts panel now includes:
+- **Training Required** — new caregivers waiting for training.
+- **Training Overdue** — caregivers with overdue assignments.
+- **Training Complete — Ready for Activation** — caregivers who finished training and need documents/background check review.
+
+### Scheduling
+- Only caregivers with `activation_status = active` appear in visit creation/edit dropdowns.
+- The caregiver dropdown in the visit modal shows a note explaining the active-only filter.
+- If a previously scheduled caregiver becomes ineligible, the edit modal shows a red warning and keeps them selected until an active caregiver is chosen.
 
 ---
 

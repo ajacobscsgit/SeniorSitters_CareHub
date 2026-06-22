@@ -238,7 +238,149 @@ deleteCaregiverResource(id)
 ## Setup Checklist
 
 1. Run `supabase/migrations/20260524_training_hub.sql` in Supabase SQL Editor
-2. Verify seed data created default `onboarding_checklist` rows for existing caregivers
-3. Verify 6 default resource entries were seeded (emergency, contacts, policies)
-4. Set `window.DEBUG = true` temporarily to verify DB calls in console
-5. Add your real business phone number to the "After-Hours Contact" resource via the Resources tab
+2. Run `supabase/migrations/20260621_phase2_training_hub.sql` in Supabase SQL Editor
+3. Verify seed data created default `onboarding_checklist` rows for existing caregivers
+4. Verify the 12 required onboarding modules and quiz questions were seeded
+5. Verify the `caregiver-documents` storage bucket was created
+6. Set `window.DEBUG = true` temporarily to verify DB calls in console
+7. Add your real business phone number to the "After-Hours Contact" resource via the Resources tab
+
+---
+
+## Phase 2: Complete Training, Documents & Activation Workflow
+
+### Overview
+Phase 2 adds a full quiz engine, secure document collection, downloadable completion certificates, and a caregiver activation workflow that integrates with scheduling.
+
+### Required Onboarding Curriculum (12 modules)
+1. Welcome to SeniorSitters
+2. Non-Medical Companion Care Overview
+3. Professional Boundaries
+4. Senior Safety
+5. Fall Prevention
+6. Emergency Response
+7. Transportation & Outings
+8. Documentation & CareHub Usage
+9. Family Communication
+10. Elder Abuse Awareness
+11. Confidentiality & Privacy
+12. Company Policies
+
+Each module is seeded as a required training module with a quiz (passing score 80%) except Welcome and Confidentiality, which require acknowledgement.
+
+### Quiz Engine Features
+- Multiple-choice and true/false questions
+- Configurable passing score per module
+- Unlimited or limited retake attempts
+- Full attempt history with scores
+- Automatic completion and certificate issuance on pass
+
+### Required Documents
+- Driver's License
+- Auto Insurance
+- Background Check
+- W9
+- Direct Deposit Form
+- Signed Policies
+
+Uploads are stored in the `caregiver-documents` Supabase Storage bucket. Admin review and approval are required.
+
+### Activation Workflow
+`approved → training_required → training_complete → documents_required → active`
+
+Caregivers must complete all required training, have all required documents approved, and have a cleared/waived background check before their activation status becomes `active`. Only `active` caregivers may be scheduled for visits.
+
+### New Phase 2 APIs
+```js
+// Quiz
+getQuizQuestions(moduleId)
+getQuizAttemptHistory(assignmentId)
+submitQuizAttempt({ assignmentId, caregiverId, moduleId, answers, score, passed })
+
+// Documents
+getCaregiverDocuments(caregiverId)
+getAllCaregiverDocuments(filters)
+createCaregiverDocument(doc)
+reviewCaregiverDocument(id, { status, reviewedBy, adminNotes })
+
+// Certificates
+getCaregiverCertificates(caregiverId)
+issueTrainingCertificate(caregiverId, assignmentId, moduleId, score)
+
+// Activation
+isCaregiverEligibleForScheduling(caregiverId)
+getEligibleCaregiversForScheduling()
+getCaregiverActivationSummary(caregiverId)
+refreshCaregiverActivation(caregiverId)
+```
+
+### Backend RPC Functions
+The migration creates two security-definer PostgreSQL functions that the UI calls instead of writing directly to protected tables:
+- `public.mark_training_assignment_complete(p_assignment_id, p_score, p_acknowledged)` — marks a caregiver's own training assignment as completed.
+- `public.issue_training_certificate(p_caregiver_id, p_assignment_id, p_module_id, p_score)` — issues a certificate only after a passed quiz attempt is recorded.
+
+### Storage RLS
+- The `caregiver-documents` Supabase Storage bucket is created automatically.
+- Public read is enabled so shared links work for admins.
+- Caregivers may only upload/update files in paths prefixed with their own `caregiver_id`.
+- Admins have full manage access on the bucket.
+
+---
+
+## Phase 3: Automatic Training Assignment, Status Badges, and Activation Gating
+
+### Overview
+Phase 3 connects caregiver application approval to the Training Hub. When an application is approved, required training is assigned automatically, the caregiver's activation status is set to `training_required`, and the caregiver advances to `active` once training, documents, and background check are complete.
+
+### Automatic Workflow
+1. Admin approves a caregiver application.
+2. `createCaregiverFromApplication` creates the caregiver profile.
+3. `assignRequiredTrainingAndDocuments` assigns all required active modules with a 7-day due date.
+4. `refreshCaregiverActivation` sets `activation_status` to `training_required`.
+5. A portal invite is sent (now or later).
+6. The caregiver logs in and sees assigned training immediately.
+7. The caregiver completes all required modules.
+8. `refreshCaregiverActivation` advances the caregiver to `documents_required` or `active`.
+9. Admins receive a notification when all required training is complete.
+10. Only `active` caregivers can be scheduled for visits.
+
+### Training Status Badges
+Caregiver profiles and directory show a Phase 3 badge:
+- **Training Required** — activation status is `training_required`.
+- **Training In Progress** — training is partially complete or training is done but documents/background check are pending.
+- **Active** — activation status is `active`.
+- **Training Overdue** — at least one required assignment is past its due date.
+
+### Admin Bulk Actions
+In the Training Hub → Training tab, admins can:
+- **Assign Required Training to All Eligible Caregivers** — assigns missing required modules to every caregiver with `activation_status = training_required`.
+- **Backfill Existing Caregivers** — assigns missing required modules to all onboarding and active caregivers who were approved before the automation existed.
+
+Both actions are idempotent: existing assignments are not duplicated.
+
+### Dashboard Alerts
+The admin dashboard shows alerts for:
+- Caregivers needing training (`activation_status = training_required`).
+- Overdue training assignments.
+- Caregivers who completed training and are ready for activation.
+
+### Scheduling Gating
+- Visit creation and edit dropdowns only include caregivers with `activation_status = active`.
+- The caregiver dropdown shows a note: "Only caregivers with Active training status can be scheduled."
+- If a caregiver becomes ineligible after being scheduled, the edit modal shows a red warning and keeps the caregiver selected only until an active replacement is chosen.
+- `createSchedule` and `updateSchedule` in `database.js` block the save if the caregiver is not active.
+
+### New Phase 3 APIs
+```js
+// Bulk assignment
+assignRequiredTrainingAndDocuments(caregiverId, { dueDays, notify })
+assignRequiredTrainingToCaregiver(caregiverId, { dueDays, notify })
+assignRequiredTrainingToAllEligibleCaregivers({ dueDays })
+backfillRequiredTrainingForAllEligibleCaregivers({ dueDays })
+
+// Status badge
+getCaregiverTrainingBadge(caregiverId)
+
+// Admin notification
+notifyIfTrainingComplete(caregiverId)
+```
