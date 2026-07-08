@@ -313,29 +313,6 @@
                 </button>
             </div>
 
-            <!-- Admin / Owner -->
-            <div class="role-card role-admin" onclick="demoLogin('admin@ruknanalytics.com', this)">
-                <div class="role-icon">
-                    <i class="ph ph-crown"></i>
-                </div>
-                <div class="role-title">Admin / Owner</div>
-                <div class="role-desc">Full command-center access: applications, caregivers, clients, schedules, payroll, and reports.</div>
-                <button class="role-btn" type="button" data-email="admin@ruknanalytics.com">
-                    <i class="ph ph-sign-in"></i> Enter as Admin
-                </button>
-            </div>
-
-            <!-- Co-Owner -->
-            <div class="role-card role-owner" onclick="demoLogin('owner@seniorsittersco.com', this)">
-                <div class="role-icon">
-                    <i class="ph ph-user-gear"></i>
-                </div>
-                <div class="role-title">Co-Owner</div>
-                <div class="role-desc">Operations access: scheduling, timesheets, visit updates, and team management.</div>
-                <button class="role-btn" type="button" data-email="owner@seniorsittersco.com">
-                    <i class="ph ph-sign-in"></i> Enter as Co-Owner
-                </button>
-            </div>
         </div>
 
         <div class="demo-note">
@@ -352,6 +329,7 @@
 <!-- Supabase CDN -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <!-- Auth modules -->
+<script src="js/config.local.js"></script>
 <script src="js/config.js"></script>
 <script src="js/supabase-auth.js"></script>
 <script src="js/auth.js"></script>

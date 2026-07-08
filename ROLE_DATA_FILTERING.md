@@ -388,7 +388,7 @@ seedDemoIds({ caregiver_id: null })
 ### Manual Test Procedure
 
 #### Step 1 — Find real UUIDs
-1. Log in as `admin@ruknanalytics.com`
+1. Log in as a real admin/co-owner account
 2. Go to Caregivers page, open a caregiver, copy their UUID from the URL or record
 3. Go to Clients page, open a client, copy their UUID
 4. Confirm that caregiver and client have at least one shared schedule (Schedule A)

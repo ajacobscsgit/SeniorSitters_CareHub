@@ -55,6 +55,9 @@ supabase/.branches/
 
 # Local secrets
 supabase/.env
+supabase/config.local.toml
+js/config.local.js
+!js/config.local.example.js
 
 # ==========================
 # Temporary Files
@@ -63,6 +66,27 @@ supabase/.env
 *.temp
 *.bak
 *.swp
+
+# ==========================
+# Secret and Certificate Material
+# ==========================
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+
+# ==========================
+# Local Credential Artifacts
+# ==========================
+.envrc
+*.secret
+secrets.*
+service-account*.json
+credentials*.json
 
 # ==========================
 # Local Database Files

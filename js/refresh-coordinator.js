@@ -196,6 +196,10 @@ window.CareHubRefreshCoordinator = (function() {
      */
     function setupAutoRefresh(intervalMs = 60000) {
         setInterval(() => {
+            if (window.CAREHUB_BACKEND_UNAVAILABLE) {
+                console.warn('[CareHubRefresh] Auto-refresh paused: backend unavailable');
+                return;
+            }
             console.log('[CareHubRefresh] Auto-refresh triggered');
             smartRefresh();
         }, intervalMs);

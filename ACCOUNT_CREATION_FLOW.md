@@ -299,7 +299,7 @@ supabase functions deploy invite-user
 Expected output:
 ```
 Deploying Function: invite-user
-Done: https://zyoozdgdiwopgwstiugu.supabase.co/functions/v1/invite-user
+Done: https://<your-project-ref>.supabase.co/functions/v1/invite-user
 ```
 
 ### Step 3 — Test without sending emails (dry run)
@@ -310,7 +310,7 @@ Replace `<admin_access_token>` with a real JWT from an active admin session
 session via `supabase.auth.getSession()`).
 
 ```bash
-curl -X POST https://zyoozdgdiwopgwstiugu.supabase.co/functions/v1/invite-user \
+curl -X POST https://<your-project-ref>.supabase.co/functions/v1/invite-user \
   -H "Authorization: Bearer <admin_access_token>" \
   -H "Content-Type: application/json" \
   -d '{"email":"test-dry-run@example.com","role":"caregiver","full_name":"Test User","caregiver_id":null,"client_id":null}'
@@ -326,9 +326,9 @@ Expected response before sending to a real address:
 
 ### Step 4 — Flip the frontend flag
 
-In `js/config.js`, change:
+In `js/config.local.js`, change:
 ```js
-EDGE_FUNCTION_DEPLOYED: false   // ← change to true
+EDGE_FUNCTION_DEPLOYED: false   // ← change to true after deploy
 ```
 to:
 ```js
@@ -408,7 +408,7 @@ Run in Supabase Dashboard → SQL Editor before using placeholder mode.
 | `supabase-auth.js` created | ✅ Done |
 | `inviteUser()` — Edge Function path | ✅ Done |
 | `inviteUser()` — placeholder path (pending_invites) | ✅ Done |
-| `EDGE_FUNCTION_DEPLOYED` flag in `config.js` | ✅ Done (currently `false`) |
+| `EDGE_FUNCTION_DEPLOYED` flag in `config.local.js` | ✅ Done (currently `false`) |
 | `approveApplication` wired | ✅ Done |
 | `convertCareRequestToClient` wired | ✅ Done |
 | Edge Function code (`supabase/functions/invite-user/index.ts`) | ✅ Done |

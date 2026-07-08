@@ -329,48 +329,85 @@ function loadPage(page) {
     // Track page view for analytics
     if (DEBUG) console.log(`[CareHub] Navigating to: ${page}`);
     
+    let renderTask = null;
+
     switch(page) {
         case 'dashboard':
-            renderDashboard();
+            renderTask = renderDashboard();
             break;
         case 'applications':
-            renderApplications();
+            renderTask = renderApplications();
             break;
         case 'care-requests':
-            renderCareRequests();
+            renderTask = renderCareRequests();
             break;
         case 'caregivers':
-            renderCaregivers();
+            renderTask = renderCaregivers();
             break;
         case 'clients':
-            renderClients();
+            renderTask = renderClients();
             break;
         case 'schedules':
-            renderSchedules();
+            renderTask = renderSchedules();
             break;
         case 'timesheets':
-            renderTimesheets();
+            renderTask = renderTimesheets();
             break;
         case 'visit-updates':
-            renderVisitUpdates();
+            renderTask = renderVisitUpdates();
             break;
         case 'settings':
-            renderSettings();
+            renderTask = renderSettings();
             break;
         case 'notifications':
-            renderNotifications();
+            renderTask = renderNotifications();
             break;
         case 'training-hub':
-            renderTrainingHub();
+            renderTask = renderTrainingHub();
             break;
         default:
-            renderDashboard();
+            renderTask = renderDashboard();
     }
+
+    Promise.resolve(renderTask).catch((err) => {
+        handlePageRenderError(page, err);
+    });
     
     // Trigger any pending refreshes for this page
     if (window.CareHubRefreshCoordinator) {
         window.CareHubRefreshCoordinator.trigger(page, { immediate: false });
     }
+}
+
+function _isBackendNetworkError(err) {
+    const msg = ((err && err.message) || String(err || '')).toLowerCase();
+    return msg.includes('failed to fetch') || msg.includes('networkerror') || msg.includes('err_name_not_resolved');
+}
+
+function handlePageRenderError(page, err) {
+    console.error(`[CareHub] Failed to render page: ${page}`, err);
+
+    if (_isBackendNetworkError(err)) {
+        window.CAREHUB_BACKEND_UNAVAILABLE = true;
+        mainContent.innerHTML = `
+            <div class="page" style="max-width: 780px; margin: 20px auto;">
+                <div class="alert alert-error" style="display:block;">
+                    <strong>Unable to connect to Supabase.</strong><br>
+                    The configured backend host cannot be reached. Update Supabase URL/anon key in <code>js/config.js</code>, then refresh.
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    mainContent.innerHTML = `
+        <div class="page" style="max-width: 780px; margin: 20px auto;">
+            <div class="alert alert-error" style="display:block;">
+                <strong>This page failed to load.</strong><br>
+                Please check console logs and try again.
+            </div>
+        </div>
+    `;
 }
 
 // ==================== INTEGRATED DATA OPERATIONS ====================

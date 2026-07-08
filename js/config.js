@@ -10,23 +10,31 @@ window.DEBUG = false;
 // IMPORTANT: Set to false before deploying to production.
 window.DEV_MODE = true;   // Enabled for role preview testing — disable before production
 
+// Private runtime values can be provided from js/config.local.js (gitignored)
+// by setting window.CAREHUB_PRIVATE_CONFIG before this file runs.
+const PRIVATE = window.CAREHUB_PRIVATE_CONFIG || {};
+
 window.CAREHUB_CONFIG = {
-  SUPABASE_URL: "https://zyoozdgdiwopgwstiugu.supabase.co",
-  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp5b296ZGdkaXdvcGd3c3RpdWd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMzAyNDMsImV4cCI6MjA5MzYwNjI0M30.T32uwCGaZo1YkqzIaRN_7eyjzPshXdmcHPFDdM7MH7w",
+  SUPABASE_URL: PRIVATE.SUPABASE_URL || "",
+  SUPABASE_ANON_KEY: PRIVATE.SUPABASE_ANON_KEY || "",
 
   // Set to true ONLY after supabase/functions/invite-user has been deployed.
   // false = inviteUser() queues a pending_invite profile row but sends NO email.
   // true  = inviteUser() calls the Edge Function, creates a real auth account, and sends the invite email.
-  EDGE_FUNCTION_DEPLOYED: false,
+  EDGE_FUNCTION_DEPLOYED: PRIVATE.EDGE_FUNCTION_DEPLOYED === true,
 
   // EmailJS configuration for backup email on public form submissions.
   // Sign up at https://www.emailjs.com and fill these in to enable backup emails.
   // Leave as empty strings to disable (forms will still save to Supabase).
-  EMAILJS_PUBLIC_KEY:        '',   // Your EmailJS public key
-  EMAILJS_SERVICE_ID:        '',   // Your EmailJS service ID
-  EMAILJS_CAREERS_TEMPLATE:  '',   // Template ID for caregiver application emails
-  EMAILJS_CARE_TEMPLATE:     ''    // Template ID for care request emails
+  EMAILJS_PUBLIC_KEY:        PRIVATE.EMAILJS_PUBLIC_KEY || '',   // Your EmailJS public key
+  EMAILJS_SERVICE_ID:        PRIVATE.EMAILJS_SERVICE_ID || '',   // Your EmailJS service ID
+  EMAILJS_CAREERS_TEMPLATE:  PRIVATE.EMAILJS_CAREERS_TEMPLATE || '',   // Template ID for caregiver application emails
+  EMAILJS_CARE_TEMPLATE:     PRIVATE.EMAILJS_CARE_TEMPLATE || ''    // Template ID for care request emails
 };
+
+if (!window.CAREHUB_CONFIG.SUPABASE_URL || !window.CAREHUB_CONFIG.SUPABASE_ANON_KEY) {
+  console.warn('[CareHub] Supabase config missing. Create js/config.local.js from js/config.local.example.js.');
+}
 
 window.TABLES = {
   APPLICATIONS: "applications",
@@ -67,22 +75,6 @@ window.TABLES = {
 // real Supabase authentication with RLS. Remove when real auth is implemented.
 
 window.DEMO_USERS = {
-  // Admin/Owner - Full access
-  'admin@ruknanalytics.com': {
-    password: 'demo123',
-    role: 'admin_owner',
-    name: 'Admin User',
-    caregiver_id: null,
-    client_id: null
-  },
-  // Co-Owner - Almost full access (except sensitive ownership settings)
-  'owner@seniorsittersco.com': {
-    password: 'demo123',
-    role: 'co_owner',
-    name: 'Co-Owner User',
-    caregiver_id: null,
-    client_id: null
-  },
   // Caregiver - Own schedule, timesheets, visit updates, assigned clients
   // caregiver_id must match the `id` column in the caregivers table for real data.
   // Set to null here; auth.js will look up the real id after Supabase auth is wired in.
@@ -107,8 +99,8 @@ window.DEMO_USERS = {
 // Legacy constant kept for backwards compatibility during transition
 // TODO: Remove after full migration to DEMO_USERS
 window.ADMIN_CREDENTIALS = {
-  email: "admin@ruknanalytics.com",
-  password: "demo123"
+  email: "",
+  password: ""
 };
 
 // Role System - Updated May 2026

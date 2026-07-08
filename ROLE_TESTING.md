@@ -18,8 +18,8 @@
 
 | Email | Role | Password | Access Level |
 |-------|------|----------|--------------|
-| `admin@ruknanalytics.com` | Admin/Owner | `demo123` | Full access to everything |
-| `owner@seniorsittersco.com` | Co-Owner | `demo123` | Almost full (no sensitive ownership settings) |
+| `admin@seniorsittersco.com` | Admin/Owner | `demo123` | Full access to everything |
+| *(no demo account)* | Co-Owner | — | Use a real invited co-owner account |
 | `caregiver@seniorsittersco.com` | Caregiver | `demo123` | Own schedule, timesheets, visit updates, assigned clients |
 | `family@seniorsittersco.com` | Client/Family | `demo123` | Loved one's schedule, approved updates, family notes |
 
@@ -27,7 +27,7 @@
 
 ## Test Checklist by Role
 
-### 1. Admin/Owner (`admin@ruknanalytics.com`)
+### 1. Admin/Owner (`admin@seniorsittersco.com`)
 
 **Expected Behavior:** Full access to all features
 
@@ -54,7 +54,7 @@
 
 ---
 
-### 2. Co-Owner (`owner@seniorsittersco.com`)
+### 2. Co-Owner (real invited account)
 
 **Expected Behavior:** Almost full access, but sensitive ownership/admin settings may be limited later
 

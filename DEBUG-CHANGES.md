@@ -82,7 +82,7 @@ Check console for:
 ### Issue: Wrong Supabase project
 **Check**: Compare URLs
 - Website URL: Check website's config
-- CareHub URL: Should be `https://zyoozdgdiwopgwstiugu.supabase.co`
+- CareHub URL: Should be `https://<your-project-ref>.supabase.co`
 
 ## Quick Console Debug Commands
 

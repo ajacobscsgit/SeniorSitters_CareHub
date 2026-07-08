@@ -810,26 +810,6 @@
                 </div>
 
                 <div class="demo-grid">
-                    <button class="demo-btn" onclick="fillDemo('admin@ruknanalytics.com')" type="button">
-                        <div class="demo-role-badge rb-admin">
-                            <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                        </div>
-                        <div class="demo-btn-text">
-                            <span class="db-title">Admin / Owner</span>
-                            <span class="db-sub">Full access</span>
-                        </div>
-                    </button>
-
-                    <button class="demo-btn" onclick="fillDemo('owner@seniorsittersco.com')" type="button">
-                        <div class="demo-role-badge rb-owner">
-                            <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
-                        </div>
-                        <div class="demo-btn-text">
-                            <span class="db-title">Co-Owner</span>
-                            <span class="db-sub">Operations</span>
-                        </div>
-                    </button>
-
                     <button class="demo-btn" onclick="fillDemo('caregiver@seniorsittersco.com')" type="button">
                         <div class="demo-role-badge rb-cg">
                             <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
@@ -863,6 +843,7 @@
 
 <!-- Supabase CDN — must load before config.js and supabase-auth.js -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="js/config.local.js"></script>
 <script src="js/config.js"></script>
 <script src="js/supabase-auth.js"></script>
 <script src="js/auth.js"></script>
